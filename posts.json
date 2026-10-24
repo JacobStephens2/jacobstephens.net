@@ -15,6 +15,16 @@
   },
   "posts": [
     {
+      "slug": "choosing-a-baby-monitor",
+      "title": "Choosing a Baby Monitor",
+      "date": "October 23, 2026",
+      "categories": [
+        "general",
+        "ai-assisted"
+      ],
+      "status": "draft"
+    },
+    {
       "slug": "a-field-guide-to-interior-design-styles",
       "title": "A Field Guide to 33 Interior Design Styles",
       "date": "August 11, 2026",
