@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t);
+        } catch (e) {}
+      })();
+    </script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#fef9ee">
+    <meta name="robots" content="noindex, nofollow">
+    <title>Choosing a Baby Monitor | Jacob Stephens' Personal Site</title>
+    <meta name="description" content="Why a parent unit still beats a phone app for overnight listening, and which Wi-Fi hybrid monitors are worth the money.">
+    <meta property="og:title" content="Choosing a Baby Monitor">
+    <meta property="og:description" content="Why a parent unit still beats a phone app for overnight listening, and which Wi-Fi hybrid monitors are worth the money.">
+    <meta property="og:type" content="article">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:creator" content="Jacob Stephens">
+    <meta name="twitter:title" content="Choosing a Baby Monitor">
+    <meta name="twitter:description" content="Why a parent unit still beats a phone app for overnight listening, and which Wi-Fi hybrid monitors are worth the money.">
+    <!-- Umami (self-hosted) - analytics + session replay -->
+    <script defer src="https://analytics.stephens.page/script.js" data-website-id="6ccf4831-217e-4f4e-ba19-1bfed01b6d84"></script>
+    <script defer src="https://analytics.stephens.page/recorder.js" data-website-id="6ccf4831-217e-4f4e-ba19-1bfed01b6d84"></script>
+    <link rel="icon" href="/favicon-32x32.png" type="image/png">
+    <link rel="stylesheet" href="/styles/reset.css">
+    <link rel="stylesheet" href="/styles/style.css?v=23">
+    <script src="/styles/theme.js" defer></script>
+</head>
+
+<body>
+    <h1 class="title">Choosing a Baby Monitor</h1>
+    <p class="center">
+        <span>
+            <a href="https://jacobstephens.net">Jacob&nbsp;Stephens</a>
+        </span>&emsp;
+        <span>October&nbsp;23,&nbsp;2026</span>&emsp;
+        <span>~1,000&nbsp;words</span>&emsp;
+        <span>General</span>&emsp;
+        <span>AI-assisted</span>&emsp;
+    </p>
+    <p class="post-meta-nav"><a href="/posts/">All posts</a> &middot; <a href="/posts/#general">General</a> &middot; <a href="/posts/#ai-assisted">AI-assisted</a></p>
+    <p class="post-meta-nav"><a href="/posts/a-field-guide-to-interior-design-styles/">Previous post: A Field Guide to 33 Interior Design Styles</a></p>
+
+    <p>I went looking for a baby monitor that was good but not luxury-priced. I had two musts: hear the baby all night, and check the camera from my phone anywhere over the internet. Nice-to-haves were a dedicated parent screen, phone alerts, and two-way talk. I manage servers for a living, so I also looked at building one from a cheap camera and a Linux box. Short version: buy one, and build only if you want extras.</p>
+
+    <p class="option-tldr-fork"><strong>In one line:</strong> get a monitor with a dedicated parent unit <em>and</em> a phone app. The eufy E21 is the best overall pick, especially near its sale price. If you're on a tighter budget, look at the eufy C10 or the VTech RM7766HD.</p>
+
+    <h2 id="the-catch">The catch nobody advertises: phones are bad at listening all night</h2>
+
+    <p>Overnight sound is the requirement that matters most, and it's the one phone apps handle worst. Your phone wants to suspend apps in the background. Wi-Fi drops, a cloud connection silently fails, and you don't know until morning. Of the brands I looked at, only Nanit and Owlet say in their own documentation that their apps keep playing audio with the phone locked (<a href="https://support.owletcare.com/hc/en-us/articles/38141042904205-Background-Audio">Owlet's article</a>). Most of the rest never mention it.</p>
+
+    <p>Harbor, a monitor company, says it plainly in its <a href="https://harbor.co/pages/faqs">FAQ</a>:</p>
+
+    <blockquote>&#8220;phones aren&#8217;t designed to let an app (like a baby monitor app) run on it 24/7 with priority over all other parts of the phone&#8230;&#8221;</blockquote>
+
+    <p>So I'd solve the overnight problem in hardware. A dedicated parent unit has its own speaker and its own link to the camera, and that's all it does. Use the phone app for checking in from work or the car, not as the overnight alarm. That narrows the search to <strong>hybrids</strong>: a parent unit plus a real app.</p>
+
+    <h2 id="eufy">The picks: eufy E21 and C10</h2>
+
+    <p>eufy documents the overnight mode I wanted. The E21's parent unit has an &#8220;Only Audio Mode&#8221;: &#8220;The monitor continues playing ambient sound even when the screen is off&#8221; (<a href="https://support.nz.eufy.com/support/solutions/articles/154000240325-what-are-the-steps-to-activate-vox-mode-on-the-baby-monitor-e20-e21-">eufy support</a>). Cry detection runs on the camera and is free. There's no required subscription.</p>
+
+    <table>
+        <tr>
+            <th></th>
+            <th><a href="https://www.eufy.com/products/e8354121">eufy E21</a></th>
+            <th><a href="https://www.eufy.com/products/e6310121">eufy C10</a></th>
+        </tr>
+        <tr><td>Price</td><td>$259.99 (in-app coupon to about $169.99 seen in October)</td><td>$129.99</td></tr>
+        <tr><td>Parent screen</td><td>5&quot;</td><td>About 4.5&quot; (eufy doesn't state it)</td></tr>
+        <tr><td>Screen-off audio mode</td><td>Documented</td><td>Not documented</td></tr>
+        <tr><td>Camera</td><td>4K, 330&deg; pan, 8&times; zoom</td><td>2K, 351&deg; pan, 4&times; zoom</td></tr>
+        <tr><td>Camera battery</td><td>5,000 mAh, runs through a power cut</td><td>None (eufy's pages conflict)</td></tr>
+        <tr><td>Offline switch</td><td>Physical switch on the camera</td><td>Software setting</td></tr>
+        <tr><td>Free alerts</td><td>Cry, loud sound, temperature</td><td>Cry, loud sound, temperature, motion</td></tr>
+        <tr><td>Two-way talk</td><td>Yes</td><td>Not confirmed</td></tr>
+        <tr><td>Privacy shutter</td><td>No</td><td>Turns the camera to face the wall</td></tr>
+    </table>
+
+    <p>The E21's physical switch is a nice touch: flip it and the camera <a href="https://support.nz.eufy.com/support/solutions/articles/154000240331-what-is-the-purpose-of-the-wi-fi-switch-on-the-baby-monitor-e20-e21-camera-">talks only to the parent unit</a>, never the internet. Near $170, it's worth the roughly $40 over the C10 for the documented audio mode, the battery and two-way talk. The C10 makes sense if $130 is a hard limit, but ask eufy about its audio mode first. The two cameras don't work with each other's parent units.</p>
+
+    <h2 id="alternatives">Alternatives</h2>
+
+    <table>
+        <tr>
+            <th>Monitor</th>
+            <th>Price</th>
+            <th>Parent screen</th>
+            <th>Cry detection</th>
+            <th>Main catch</th>
+        </tr>
+        <tr><td>Babysense Touch</td><td>$199.99 list (seen $161&#8211;180)</td><td>7&quot; touchscreen</td><td>Yes</td><td>App is US-only</td></tr>
+        <tr><td>VTech RM7766HD</td><td>$149.95</td><td>7&quot;, screen turns off while sound stays on</td><td>No (sound and motion only)</td><td>App rated 2.9/5 on Babylist</td></tr>
+        <tr><td>VTech VC2105 V-Care</td><td>$199.95&#8211;239.95</td><td>5&quot;</td><td>Advertised, plus face, rollover and sleep tracking</td><td>AI features appear only in marketing copy</td></tr>
+        <tr><td>Motorola VM855 Connect</td><td>$99.99</td><td>5&quot;, low resolution</td><td>Yes (in the app)</td><td>App plays background audio only on the same Wi-Fi as the camera</td></tr>
+    </table>
+
+    <ul>
+        <li><strong>Babysense Touch</strong> is the closest swap for the E21: big touchscreen, dual-lens camera, cry detection, no fees. Don't confuse it with the Babysense Max View, which was <a href="https://www.cpsc.gov/Recalls/2026/Babysense-Max-View-Baby-Monitors-Recalled-Due-to-Fire-Hazard-Manufactured-by-Hisense">recalled in February 2026</a> as a fire hazard.</li>
+        <li><strong>VTech RM7766HD</strong> is the dependable one. VTech gives the clearest statement of any brand on what still works offline: &#8220;you lose only remote viewing&#8221; (<a href="https://www.vtechphones.com/support/technical-support/product/4874">VTech support</a>). The catch is that in its remote-viewing mode, the parent unit relies on your router, so a router power cut takes it down too.</li>
+        <li><strong>Motorola VM855</strong> is the cheapest hybrid. Motorola's own platform <a href="https://support.hubbleconnected.com/knowledge-base/can-i-use-my-mobile-device-for-audio-monitoring">says</a> background audio only works on the same Wi-Fi, so it doesn't work away from home.</li>
+    </ul>
+
+    <p>Higher up, <a href="https://harbor.co/products/harbor">Harbor</a> ($499) has a 10&quot; monitor and switches itself to a home-network-only mode when the internet drops. If listening on a locked phone matters more than a parent unit, <a href="https://owletcare.com/products/dream-sight">Owlet's Dream Sight</a> ($99.99) documents it best.</p>
+
+    <h2 id="build">What about building one?</h2>
+
+    <p>It's tempting. A $30 <a href="https://www.tapo.com/us/faq/724/">Tapo camera with RTSP</a>, a small Linux box running <a href="https://docs.frigate.video/configuration/audio_detectors">Frigate</a> (which has a built-in &#8220;crying&#8221; sound label) and Home Assistant gets you local recording, searchable clips, and alerts loud enough to break through Do Not Disturb. You can even send snapshots to a cloud AI model for a morning summary for a dollar or two a month.</p>
+
+    <p>But it fails the main requirement. Home Assistant can't stream live audio to a locked phone, and cry detection can <a href="https://github.com/blakeblackshear/frigate/discussions/10241">struggle through a white-noise machine</a>, which most nurseries run. So I'd buy a monitor first, and build the self-hosted setup later, alongside it, only if you want the extras.</p>
+
+    <h2 id="safety">A word on vitals monitors</h2>
+
+    <p>The American Academy of Pediatrics <a href="https://pubmed.ncbi.nlm.nih.gov/35726558/">advises against</a> using home cardiorespiratory monitors as a way to reduce the risk of SIDS. The FDA has <a href="https://www.fda.gov/medical-devices/safety-communications/do-not-use-unauthorized-infant-devices-monitoring-vital-signs-fda-safety-communication">warned against</a> unauthorized infant vitals devices. Owlet's Dream Sock is the one consumer sock the FDA has <a href="https://www.accessdata.fda.gov/cdrh_docs/reviews/DEN220091.pdf">authorized</a>. That covers alerting when pulse or oxygen leaves a preset range, not preventing SIDS. None of the camera monitors above measure vitals, and none need to.</p>
+
+    <p>Prices are from vendor stores in October 2026 and change often. This post was researched with AI help, from vendor documentation, support pages, and FDA and AAP sources.</p>
+
+    <p class="center footer">&copy; 2026 <a href="https://jacobstephens.net">Jacob Stephens</a> |
+        <a href="/privacy-policy">Privacy Policy</a>
+    </p>
+    <script src="https://stephens.page/blog/newsletter-widget.js" data-list="personal" data-mode="link" defer></script>
+</body>
+
+</html>
