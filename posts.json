@@ -15,6 +15,16 @@
   },
   "posts": [
     {
+      "slug": "choosing-a-pack-n-play",
+      "title": "Choosing a Pack ’n Play",
+      "date": "October 24, 2026",
+      "categories": [
+        "general",
+        "ai-assisted"
+      ],
+      "status": "draft"
+    },
+    {
       "slug": "choosing-a-baby-monitor",
       "title": "Choosing a Baby Monitor",
       "date": "October 23, 2026",
