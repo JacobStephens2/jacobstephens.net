@@ -167,7 +167,6 @@ class Element:
     parent: "Element | None"
     children: list = field(default_factory=list)
     end_start: int | None = None
-    end: int | None = None
 
     def has_class(self, name):
         return name in (self.attrs.get("class") or "").split()
@@ -185,6 +184,7 @@ class Document(HTMLParser):
         self.elements = []
         self.stack = []
         self.unmatched_heads = 0
+        self.head_has_text = False
         self.lines = [0]
         # HTMLParser counts only LF, whereas splitlines also splits prose at
         # Unicode separators and bare CR, moving source spans into authored text.
@@ -222,11 +222,14 @@ class Document(HTMLParser):
             element = self.stack[index]
             if element.tag == tag:
                 element.end_start = self.source_offset()
-                element.end = self.html.find(">", element.end_start) + 1
                 del self.stack[index:]
                 return
         if tag == "head":
             self.unmatched_heads += 1
+
+    def handle_data(self, data):
+        if self.stack and self.stack[-1].tag == "head" and data.strip(" \t\n\f\r"):
+            self.head_has_text = True
 
     def require_closed(self, element, description):
         if element.end_start is None:
@@ -243,8 +246,11 @@ class Document(HTMLParser):
         return self.require_closed(node, identifier)
 
     def replace(self, spans):
+        ordered = sorted(spans)
+        if any(right[0] < left[1] for left, right in zip(ordered, ordered[1:])):
+            self.fail("overlapping owned HTML targets; archive lists must be separate")
         result = self.html
-        for start, end, replacement in sorted(spans, reverse=True):
+        for start, end, replacement in reversed(ordered):
             result = result[:start] + replacement + result[end:]
         return result
 
@@ -302,6 +308,16 @@ def post_html(snapshot, draft):
     head = document.require_closed(heads[0], "head")
     if head.parent is not None and head.parent.tag != "html":
         document.fail("head must be directly inside html")
+    # Body content implicitly closes a browser's head, even when a later literal
+    # </head> appears. Do not insert robots after that implicit closing point.
+    metadata_tags = {"base", "link", "meta", "title", "style", "script", "noscript", "template"}
+    if document.head_has_text or any(child.tag not in metadata_tags for child in head.children):
+        document.fail("head must contain only metadata, comments and whitespace")
+    for child in head.children:
+        if child.tag not in document.VOID_TAGS:
+            document.require_closed(child, f"head <{child.tag}>")
+    if any(node.tag == "body" and node.start < head.end_start for node in document.elements):
+        document.fail("head must end before body content starts")
     robots = [node for node in document.elements if node.tag == "meta"
               and (node.attrs.get("name") or "").strip().lower() == "robots"]
     if len(robots) > 1:

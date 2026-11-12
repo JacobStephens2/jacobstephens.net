@@ -167,6 +167,15 @@ class PublishCommands(unittest.TestCase):
             self.write("posts.json", source)
             self.assert_rejected_without_writes("build", message=message)
 
+    def test_overlapping_archive_targets_fail_without_writes(self):
+        nested = ARCHIVE.replace(
+            "<h2>Chronological</h2><ul class='archive-list'></ul></section>",
+            "<h2>Chronological</h2><ul class='archive-list'><li>",
+        ).replace("<footer>", "</li></ul></section><footer>")
+        self.write("posts/index.html", nested)
+        for args in [("check",), ("build",), ("draft", "first"), ("publish", "first")]:
+            self.assert_rejected_without_writes(*args, message="overlapping")
+
     def test_unknown_slugs_and_manifest_only_commands(self):
         (self.root / "posts/index.html").unlink()
         before = self.snapshot()
@@ -187,6 +196,9 @@ class PublishCommands(unittest.TestCase):
             (POST.replace("</head>", "</head></head>"), "head"),
             (POST.replace("<head>", "<head/>"), "head"),
             (POST.replace("<head>", "<body><head>"), "head"),
+            (POST.replace("</head>", "").replace("</html>", "</head></html>"), "head"),
+            (POST.replace("<head>", "<head>Unexpected prose"), "head"),
+            (POST.replace("<head>", "<body></body><head>"), "head"),
             (POST.replace("</head>", "<meta name='robots'><meta NAME=ROBOTS></head>"), "robots"),
             (POST.replace("</body>", "<meta name='robots'></body>"), "robots"),
         ]
