@@ -49,16 +49,18 @@ SHARED_CHROME_FILES = frozenset({"/favicon-32x32.png"})
 SHARED_CHROME_PREFIXES = ("/styles/", "/fonts/", "/icons/")
 URL_META_KEYS = frozenset({
     "og:image", "og:image:url", "og:image:secure_url",
-    "twitter:image", "twitter:image:src",
+    "twitter:image", "twitter:image:src", "twitter:image:url", "twitter:player",
     "og:url", "twitter:url",
-    "og:audio", "og:audio:url",
-    "og:video", "og:video:url",
+    "og:audio", "og:audio:url", "og:audio:secure_url",
+    "og:video", "og:video:url", "og:video:secure_url",
 })
 PAGE_META_KEYS = frozenset({"og:url", "twitter:url"})
 CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 CSS_URL_RE = re.compile(r"""url\(\s*(?:'([^']*)'|"([^"]*)"|([^)"'\s]+))\s*\)""", re.IGNORECASE)
 CSS_IMPORT_RE = re.compile(r"""@import\s+(?:'([^']*)'|"([^"]*)")""", re.IGNORECASE)
-REFRESH_URL_RE = re.compile(r";\s*url\s*=\s*(.+)$", re.IGNORECASE)
+REFRESH_URL_PREFIX = re.compile(r"url\s*=\s*", re.IGNORECASE)
+ABRUPT_COMMENT_CLOSE = re.compile(r"-?>")
+MAX_SRCDOC_DEPTH = 16
 SPECIAL_SCHEME_PREFIX = re.compile(r"^(?:https?|ftp|ws|wss|file):", re.IGNORECASE)
 URL_STRIP_CHARS = "".join(chr(code) for code in range(0x21))
 URL_TAB_NL_REMOVE = str.maketrans("", "", "\t\n\r")
@@ -369,19 +371,78 @@ def post_html(snapshot, draft):
 
 
 def parse_srcset(value):
-    """Extract candidate URLs from an HTML srcset attribute."""
+    """Extract candidate URLs using the HTML5 srcset parsing algorithm."""
     urls = []
-    parts = value.split(",")
-    index = 0
-    while index < len(parts):
-        candidate = parts[index].strip()
-        if candidate.startswith("data:") and index + 1 < len(parts) and not any(ch.isspace() for ch in candidate):
-            candidate = candidate + "," + parts[index + 1].strip()
-            index += 1
-        index += 1
-        if candidate:
-            urls.append(candidate.split()[0])
+    pos = 0
+    length = len(value)
+    ascii_ws = " \t\n\f\r"
+    while pos < length:
+        while pos < length and (value[pos] in ascii_ws or value[pos] == ","):
+            pos += 1
+        if pos >= length:
+            break
+        start = pos
+        while pos < length and value[pos] not in ascii_ws:
+            pos += 1
+        url = value[start:pos]
+        if url.endswith(","):
+            url = url.rstrip(",")
+            if url:
+                urls.append(url)
+            continue
+        if url:
+            urls.append(url)
+        in_parens = False
+        while pos < length:
+            ch = value[pos]
+            pos += 1
+            if ch == "(":
+                in_parens = True
+            elif ch == ")":
+                in_parens = False
+            elif ch == "," and not in_parens:
+                break
     return urls
+
+
+def parse_refresh_url(content):
+    """Extract a redirect target from an HTML5 meta refresh content value."""
+    text = content.strip(" \t\n\f\r")
+    if not text:
+        return None
+    index = 0
+    while index < len(text) and text[index].isdigit():
+        index += 1
+    if index == 0:
+        if text[0] not in (";", ","):
+            return None
+    elif index < len(text) and text[index] == ".":
+        index += 1
+        while index < len(text) and text[index].isdigit():
+            index += 1
+    if index >= len(text) or text[index] not in ";, \t\n\f\r":
+        return None
+    saw_separator = False
+    while index < len(text) and text[index] in " \t\n\f\r":
+        index += 1
+        saw_separator = True
+    if index < len(text) and text[index] in (";", ","):
+        index += 1
+        saw_separator = True
+        while index < len(text) and text[index] in " \t\n\f\r":
+            index += 1
+    if not saw_separator or index >= len(text):
+        return None
+    rest = text[index:]
+    match = REFRESH_URL_PREFIX.match(rest)
+    if match:
+        rest = rest[match.end():]
+    if not rest:
+        return None
+    if rest[0] in ("'", '"'):
+        end = rest.find(rest[0], 1)
+        return rest[1:end] if end != -1 else rest[1:]
+    return rest.rstrip(" \t\n\f\r")
 
 
 def extract_css_urls(css_text):
@@ -402,13 +463,25 @@ class Reference:
 class ReferenceParser(HTMLParser):
     """Extract asset and link references from a post HTML file."""
 
-    def __init__(self, html):
+    def __init__(self, html, path=None, depth=0):
         super().__init__(convert_charrefs=True)
         self.references = []
+        self._path = path
+        self._depth = depth
         self._in_style = False
         self._style_chunks = []
         self.feed(html)
         self.close()
+
+    def parse_comment(self, i, report=True):
+        rawdata = self.rawdata
+        if rawdata.startswith("<!--", i):
+            abrupt = ABRUPT_COMMENT_CLOSE.match(rawdata, i + 4)
+            if abrupt:
+                if report:
+                    self.handle_comment("")
+                return abrupt.end()
+        return super().parse_comment(i, report=report)
 
     def _add(self, url, is_page_link=False, allow_local_dir=False):
         self.references.append(Reference(url, is_page_link, allow_local_dir))
@@ -422,6 +495,8 @@ class ReferenceParser(HTMLParser):
         first_attrs = {}
         for name, value in attrs:
             first_attrs.setdefault(name, value)
+        if tag == "base" and first_attrs.get("href") is not None:
+            raise InvalidSite(f"{self._path or 'html'}: <base href> is not allowed inside post HTML")
         rel_tokens = (first_attrs.get("rel") or "").lower().split()
         for name, value in first_attrs.items():
             if value is None:
@@ -431,14 +506,25 @@ class ReferenceParser(HTMLParser):
                 self._add(value, is_page_link=page_link, allow_local_dir=page_link)
             elif name == "src":
                 self._add(value, allow_local_dir=(tag == "iframe"))
-            elif name in ("poster", "data"):
+            elif name in ("poster", "data", "background"):
                 self._add(value)
-            elif name == "srcset":
+            elif name in ("action", "formaction"):
+                self._add(value, is_page_link=True, allow_local_dir=True)
+            elif name == "ping":
+                for target in value.split():
+                    self._add(target)
+            elif name in ("srcset", "imagesrcset"):
                 for url in parse_srcset(value):
                     self._add(url)
             elif name == "style":
                 self._add_css(value)
-        if tag == "meta":
+        if tag == "iframe":
+            srcdoc = first_attrs.get("srcdoc")
+            if srcdoc is not None:
+                if self._depth >= MAX_SRCDOC_DEPTH:
+                    raise InvalidSite(f"{self._path or 'html'}: nested iframe srcdoc exceeds maximum depth")
+                self.references.extend(ReferenceParser(srcdoc, self._path, self._depth + 1).references)
+        elif tag == "meta":
             self._handle_meta(first_attrs)
         elif tag == "style":
             self._in_style = True
@@ -448,14 +534,16 @@ class ReferenceParser(HTMLParser):
         content = attr_map.get("content")
         if content is None:
             return
-        key = (attr_map.get("property") or attr_map.get("name") or "").strip().lower()
-        if key in URL_META_KEYS:
-            page_link = key in PAGE_META_KEYS
-            self._add(content, is_page_link=page_link, allow_local_dir=page_link)
-        elif (attr_map.get("http-equiv") or "").strip().lower() == "refresh":
-            match = REFRESH_URL_RE.search(content.strip())
-            if match:
-                target = match.group(1).strip().strip("'\"")
+        seen_keys = set()
+        for attr in ("property", "name"):
+            key = (attr_map.get(attr) or "").strip().lower()
+            if key in URL_META_KEYS and key not in seen_keys:
+                seen_keys.add(key)
+                page_link = key in PAGE_META_KEYS
+                self._add(content, is_page_link=page_link, allow_local_dir=page_link)
+        if (attr_map.get("http-equiv") or "").strip().lower() == "refresh":
+            target = parse_refresh_url(content)
+            if target is not None:
                 self._add(target, is_page_link=True, allow_local_dir=True)
 
     def handle_endtag(self, tag):
@@ -554,7 +642,7 @@ class PostBoundaryValidator:
         root_path = self.post_dir / "index.html"
         for html_path in post_html_files(self.post_dir):
             snapshot = root_page if html_path == root_path else FileSnapshot.read(html_path)
-            for ref in ReferenceParser(snapshot.text()).references:
+            for ref in ReferenceParser(snapshot.text(), html_path).references:
                 self.validate_reference(html_path, ref)
 
     def _resolve_segments(self, html_path, raw_url, raw_path, initial_parts=(), allow_escape=False):

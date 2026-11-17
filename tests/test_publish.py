@@ -543,6 +543,7 @@ class PublishCommands(unittest.TestCase):
             "<a href='model-council/sources/'>Sources</a>"
             "<a href='model-council/research.md'>Markdown</a>"
             "<img src='hero.jpg?v=1' srcset='/posts/first/hero.jpg 1x'>"
+            "<img srcset='data:image/png;base64,iVBORw0KGgo= 1x, hero.jpg 2x'>"
             "<a href='spaced%20file.pdf'>PDF</a>"
             "<a href='#local'>Anchor</a>"
             "<a href='mailto:jacob@stephens.page'>Email</a>"
@@ -573,6 +574,33 @@ class PublishCommands(unittest.TestCase):
             (POST.replace("<p>", "<img src='https://jacobstephens%2enet/static/image.jpg'><p>"), "/static/"),
             (POST.replace("<p>", "<img src='//%6a%61%63%6f%62%73%74%65%70%68%65%6e%73.net/posts/first/hero.jpg'><p>"), "escapes /posts/second/"),
             (POST.replace("<p>", "<img src='ht&#x09;tps://jacobstephens.net\\@evil.example/static/image.jpg'><p>"), "escapes /posts/second/"),
+        ]
+        for html, message in cases:
+            self.write("posts/second/index.html", html)
+            for args in [("check",), ("build",), ("draft", "first"), ("publish", "first")]:
+                with self.subTest(html=html, args=args):
+                    self.assert_rejected_without_writes(*args, message=message)
+
+    def test_html_parser_and_attribute_extraction_bypasses_fail_without_writes(self):
+        self.write("static/image.jpg", "legacy")
+        self.write("posts/first/hero.jpg", "first-hero")
+        self.write("posts/second/present.jpg", "ok")
+        cases = [
+            (POST.replace("<p>", "<!--><img src='/static/image.jpg'>--><p>"), "/static/"),
+            (POST.replace("<p>", "<!---><img src='/posts/first/hero.jpg'>--><p>"), "escapes /posts/second/"),
+            (POST.replace("<p>", "<iframe srcdoc=\"<img src='/static/image.jpg'>\"></iframe><p>"), "/static/"),
+            (POST.replace("<p>", "<iframe srcdoc=\"<iframe srcdoc='&lt;img src=/posts/first/hero.jpg&gt;'></iframe>\"></iframe><p>"), "escapes /posts/second/"),
+            (POST.replace("<p>", "<img srcset='data:, /static/image.jpg 2x'><p>"), "/static/"),
+            (POST.replace("<p>", "<img srcset='data:image/png;base64, /posts/first/hero.jpg 2x'><p>"), "escapes /posts/second/"),
+            (POST.replace("</head>", "<meta http-equiv='refresh' content='0,url=/static/image.jpg'></head>"), "/static/"),
+            (POST.replace("</head>", "<meta http-equiv='refresh' content='0 url=/static/image.jpg'></head>"), "/static/"),
+            (POST.replace("</head>", "<meta http-equiv='refresh' content='0; /posts/first/hero.jpg'></head>"), "escapes /posts/second/"),
+            (POST.replace("</head>", "<meta property='article:tag' name='twitter:image' content='/static/image.jpg'></head>"), "/static/"),
+            (POST.replace("<body>", "<body background='/static/image.jpg'>"), "/static/"),
+            (POST.replace("</head>", "<link rel='preload' as='image' imagesrcset='/static/image.jpg 1x'></head>"), "/static/"),
+            (POST.replace("<p>", "<form action='/static/image.jpg'></form><p>"), "/static/"),
+            (POST.replace("<p>", "<a href='present.jpg' ping='/static/image.jpg'>p</a><p>"), "/static/"),
+            (POST.replace("</head>", "<base href='/styles/style.css'></head>").replace("<p>", "<img src='present.jpg'><p>"), "<base href>"),
         ]
         for html, message in cases:
             self.write("posts/second/index.html", html)
