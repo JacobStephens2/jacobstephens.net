@@ -558,6 +558,28 @@ class PublishCommands(unittest.TestCase):
         self.assert_success("publish", "first")
         self.assert_success("check")
 
+    def test_url_normalization_and_idna_bypasses_fail_without_writes(self):
+        self.write("static/image.jpg", "legacy")
+        self.write("posts/first/hero.jpg", "first-hero")
+        self.write("posts/second/present.jpg", "ok")
+        cases = [
+            (POST.replace("<p>", "<img src='ht&#x09;tps://jacobstephens.net\\static\\image.jpg'><p>"), "/static/"),
+            (POST.replace("<p>", "<img src='ht&#x0a;tps://jacobstephens.net\\posts\\first\\hero.jpg'><p>"), "escapes /posts/second/"),
+            (POST.replace("<p>", "<img src='/&#x09;/jacobstephens.net\\static\\image.jpg'><p>"), "/static/"),
+            (POST.replace("<p>", "<img src='\x01https://jacobstephens.net\\static\\image.jpg'><p>"), "/static/"),
+            (POST.replace("<p>", "<img src='https://jacobstephens\u3002net/static/image.jpg'><p>"), "/static/"),
+            (POST.replace("<p>", "<img src='https://\uff4a\uff41\uff43\uff4f\uff42\uff53\uff54\uff45\uff50\uff48\uff45\uff4e\uff53.\uff4e\uff45\uff54/static/image.jpg'><p>"), "/static/"),
+            (POST.replace("<p>", "<img src='https://%6a%61%63%6f%62%73%74%65%70%68%65%6e%73.net/static/image.jpg'><p>"), "/static/"),
+            (POST.replace("<p>", "<img src='https://jacobstephens%2enet/static/image.jpg'><p>"), "/static/"),
+            (POST.replace("<p>", "<img src='//%6a%61%63%6f%62%73%74%65%70%68%65%6e%73.net/posts/first/hero.jpg'><p>"), "escapes /posts/second/"),
+            (POST.replace("<p>", "<img src='ht&#x09;tps://jacobstephens.net\\@evil.example/static/image.jpg'><p>"), "escapes /posts/second/"),
+        ]
+        for html, message in cases:
+            self.write("posts/second/index.html", html)
+            for args in [("check",), ("build",), ("draft", "first"), ("publish", "first")]:
+                with self.subTest(html=html, args=args):
+                    self.assert_rejected_without_writes(*args, message=message)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -60,6 +60,9 @@ CSS_URL_RE = re.compile(r"""url\(\s*(?:'([^']*)'|"([^"]*)"|([^)"'\s]+))\s*\)""",
 CSS_IMPORT_RE = re.compile(r"""@import\s+(?:'([^']*)'|"([^"]*)")""", re.IGNORECASE)
 REFRESH_URL_RE = re.compile(r";\s*url\s*=\s*(.+)$", re.IGNORECASE)
 SPECIAL_SCHEME_PREFIX = re.compile(r"^(?:https?|ftp|ws|wss|file):", re.IGNORECASE)
+URL_STRIP_CHARS = "".join(chr(code) for code in range(0x21))
+URL_TAB_NL_REMOVE = str.maketrans("", "", "\t\n\r")
+FORBIDDEN_HOST_CHARS = frozenset("/\\?#@% ")
 
 # This public configuration contains only the location of the server's password
 # file. If the file is missing, Apache refuses access to the draft.
@@ -466,6 +469,38 @@ class ReferenceParser(HTMLParser):
             self._style_chunks.append(data)
 
 
+def preprocess_url(html_path, raw_url):
+    """Trim C0/space edges, remove ASCII tab/newline, and reject remaining controls."""
+    url = raw_url.strip(URL_STRIP_CHARS).translate(URL_TAB_NL_REMOVE)
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in url):
+        raise InvalidSite(f"{html_path}: invalid control character in URL {raw_url!r}")
+    return url
+
+
+def canonicalize_host(html_path, raw_url, parsed):
+    """Percent-decode and IDNA-canonicalize a parsed host, stripping one trailing dot."""
+    raw_host = parsed.hostname
+    if not raw_host:
+        return ""
+    host = unquote(raw_host)
+    if (
+        any(ch in FORBIDDEN_HOST_CHARS or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in host)
+        or (":" in host and "[" not in parsed.netloc)
+    ):
+        raise InvalidSite(f"{html_path}: malformed URL {raw_url!r}")
+    if not host.isascii():
+        try:
+            host = host.encode("idna").decode("ascii")
+        except UnicodeError as error:
+            raise InvalidSite(f"{html_path}: malformed URL {raw_url!r}: {error}") from error
+    host = host.lower()
+    if host.endswith("."):
+        host = host[:-1]
+    if not host or host.endswith("."):
+        raise InvalidSite(f"{html_path}: malformed URL {raw_url!r}")
+    return host
+
+
 def normalize_authority_url(url):
     """Normalize backslashes to slashes before '?'/'#' for special schemes and '//'."""
     if not (url.startswith("//") or SPECIAL_SCHEME_PREFIX.match(url)):
@@ -613,7 +648,7 @@ class PostBoundaryValidator:
         self._verify_post_target(html_path, parts, is_dir, ref.allow_local_dir, ref.url)
 
     def validate_reference(self, html_path, ref):
-        url = ref.url.strip()
+        url = preprocess_url(html_path, ref.url)
         if not url:
             if not ref.is_page_link:
                 raise InvalidSite(f"{html_path}: empty asset reference")
@@ -622,9 +657,7 @@ class PostBoundaryValidator:
             return
         try:
             parsed = urlsplit(normalize_authority_url(url))
-            host = (parsed.hostname or "").lower()
-            if host.endswith("."):
-                host = host[:-1]
+            host = canonicalize_host(html_path, url, parsed)
         except ValueError as error:
             raise InvalidSite(f"{html_path}: malformed URL {url!r}: {error}") from error
 
