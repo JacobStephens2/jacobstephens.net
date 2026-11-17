@@ -17,7 +17,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 RESULTS = HERE / "sim_results.json"
-POSTS_DIR = HERE.parent.parent / "posts"
+POSTS_DIR = HERE.parent
 
 BEGIN = "      /* @generated from sim_results.json by build_chart_data.py - do not edit */"
 END = "      /* @end generated */"
