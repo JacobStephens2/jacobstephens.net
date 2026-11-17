@@ -1,6 +1,7 @@
 """Tests for colocated post assets, chart data generation, and static redirects."""
 
 from html.parser import HTMLParser
+import json
 from pathlib import Path
 import re
 import shutil
@@ -16,15 +17,42 @@ CHART_SCRIPT = ROOT / "posts" / "tigris-and-euphrates-scoring-rule" / "build_cha
 CHART_RESULTS = ROOT / "posts" / "tigris-and-euphrates-scoring-rule" / "sim_results.json"
 TIGRIS_HTML = ROOT / "posts" / "tigris-and-euphrates-scoring-rule" / "index.html"
 
+MANIFEST = ROOT / "posts.json"
 MIGRATED_POSTS = (
     "tigris-and-euphrates-scoring-rule",
     "on-sexuality-and-criminality",
     "why-anti-cyrillic-croats-attack-serbian-language",
     "finding-greener-alternatives-to-ap-chromatography-lab",
+    "a-field-guide-to-interior-design-styles",
+    "best-2-player-android-games",
+    "pixel-10-pro-xl-case-choices",
+    "mentor-collage",
+    "two-person-agile-product-development-flowchart",
+    "mailer-for-agnes-irwin-future-owl-fly-by",
+    "let-it-grow-banner",
+    "custom-content-management-system",
+    "converting-my-book-of-the-churchs-year-into-a-coloring-book",
+    "updating-biomass-controls-website",
+    "e-commerce-site-for-kims-creations",
+    "brandywine-oak-private-wealths-dynamic-content",
+    "website-for-rose-river-way-studio",
+    "montgomery-school-map",
+    "corsage-removal-with-photoshop",
+    "comptia-a-it-technician-certification",
 )
+
+SOCIAL_META_POSTS = (
+    "a-field-guide-to-interior-design-styles",
+    "best-2-player-android-games",
+    "pixel-10-pro-xl-case-choices",
+    "mentor-collage",
+)
+
+SITE_ORIGIN = "https://jacobstephens.net"
 
 REMOVED_STATIC_DIRS = (
     "tigris-and-euphrates",
+    "stewardgoods",
     "028f841bbba7a644da6d72d66abecd43",
     "0c7c64a5f5f92661d8d92a6d0700ad3d",
     "27752169223039ada5e361fffc255a03",
@@ -83,20 +111,142 @@ for _hash_dir, _variants, _filename in CHROMATOGRAPHY_MIGRATED_ASSETS:
     for _variant in _variants:
         EXPECTED_REDIRECTS[f"/static/{_hash_dir}/{_variant}/{_filename}"] = _dest
 
+STEWARDGOODS_MIGRATED_ASSETS = {
+    "a-field-guide-to-interior-design-styles": (
+        "interior-design-styles/art-deco.jpg",
+        "interior-design-styles/art-nouveau.jpg",
+        "interior-design-styles/arts-and-crafts.jpg",
+        "interior-design-styles/bohemian.jpg",
+        "interior-design-styles/boho-mountain.jpg",
+        "interior-design-styles/british-colonial.jpg",
+        "interior-design-styles/brutalist.jpg",
+        "interior-design-styles/coastal.jpg",
+        "interior-design-styles/contemporary.jpg",
+        "interior-design-styles/cottage.jpg",
+        "interior-design-styles/eclectic.jpg",
+        "interior-design-styles/english-country.jpg",
+        "interior-design-styles/french-baroque.jpg",
+        "interior-design-styles/french-country.jpg",
+        "interior-design-styles/hollywood-glam.jpg",
+        "interior-design-styles/industrial.jpg",
+        "interior-design-styles/international.jpg",
+        "interior-design-styles/japandi.jpg",
+        "interior-design-styles/maximalist.jpg",
+        "interior-design-styles/mediterranean.jpg",
+        "interior-design-styles/mid-century-modern.jpg",
+        "interior-design-styles/minimalist.jpg",
+        "interior-design-styles/modern-farmhouse.jpg",
+        "interior-design-styles/modern.jpg",
+        "interior-design-styles/organic-modern.jpg",
+        "interior-design-styles/rustic.jpg",
+        "interior-design-styles/scandinavian.jpg",
+        "interior-design-styles/shabby-chic.jpg",
+        "interior-design-styles/southwest.jpg",
+        "interior-design-styles/traditional.jpg",
+        "interior-design-styles/transitional.jpg",
+        "interior-design-styles/tuscan.jpg",
+        "interior-design-styles/victorian.jpg",
+    ),
+    "best-2-player-android-games": (
+        "best-2-player-android-games.jpg",
+        "two-player-android-games/bombsquad.jpg",
+        "two-player-android-games/bounden.jpg",
+        "two-player-android-games/dual.jpg",
+        "two-player-android-games/duel-otters.jpg",
+        "two-player-android-games/jaipur.jpg",
+        "two-player-android-games/keep-talking.jpg",
+        "two-player-android-games/polytopia.jpg",
+        "two-player-android-games/seven-wonders-duel-tldr.jpg",
+        "two-player-android-games/seven-wonders-duel.jpg",
+        "two-player-android-games/spaceteam-screenshot.png",
+        "two-player-android-games/star-realms.jpg",
+        "two-player-android-games/the-past-within.jpg",
+        "two-player-android-games/tick-tock.jpg",
+    ),
+    "pixel-10-pro-xl-case-choices": (
+        "pixel-10-pro-xl-case-choices.png",
+        "pixel-cases/bellroy-mag-wallet.jpg",
+        "pixel-cases/casebus-harper-purple-1.jpg",
+        "pixel-cases/casebus-harper-purple-2.jpg",
+        "pixel-cases/casebus-harper-purple-3.jpg",
+        "pixel-cases/google-pixelsnap-case-jade.jpg",
+        "pixel-cases/google-pixelsnap-case-lineup.jpg",
+        "pixel-cases/google-pixelsnap-case-moonstone.jpg",
+        "pixel-cases/google-pixelsnap-case-obsidian.jpg",
+        "pixel-cases/google-pixelsnap-case-porcelain.jpg",
+        "pixel-cases/snakehive-metro-wallet-black.jpg",
+        "pixel-cases/snakehive-metro-wallet.jpg",
+        "pixel-cases/torro-pixel-10-pro-xl-wallet.jpg",
+    ),
+    "mentor-collage": ("mentor-collage.jpg",),
+    "two-person-agile-product-development-flowchart": (
+        "ProductDevelopmentFlowchart-TwoPerson-v1.pdf",
+        "agile-flowchart-highres.png",
+    ),
+    "mailer-for-agnes-irwin-future-owl-fly-by": ("agnes-irwin-mailer.jpg",),
+    "let-it-grow-banner": ("let-it-grow-banner.jpg",),
+    "custom-content-management-system": ("artifact-management-tool.png",),
+    "converting-my-book-of-the-churchs-year-into-a-coloring-book": (
+        "churchs-year-coloring.jpg",
+        "churchs-year-original.jpg",
+    ),
+    "updating-biomass-controls-website": ("biomass-homepage.png",),
+    "e-commerce-site-for-kims-creations": ("kims-creations-product-page.png",),
+    "brandywine-oak-private-wealths-dynamic-content": (
+        "brandywine-oak-homepage-after.png",
+        "brandywine-oak-homepage-before.png",
+        "brandywine-oak-scroll-after.png",
+        "brandywine-oak-scroll-before.png",
+    ),
+    "website-for-rose-river-way-studio": (
+        "rose-river-way-new.png",
+        "rose-river-way-old.png",
+    ),
+    "montgomery-school-map": ("montgomery-school-map.jpg",),
+    "corsage-removal-with-photoshop": (
+        "corsage-after.jpg",
+        "corsage-before.jpg",
+    ),
+    "comptia-a-it-technician-certification": ("comptia-a-plus.png",),
+}
+for _slug, _assets in STEWARDGOODS_MIGRATED_ASSETS.items():
+    for _rel in _assets:
+        EXPECTED_REDIRECTS[f"/static/stewardgoods/{_rel}"] = f"/posts/{_slug}/{Path(_rel).name}"
+
+REMOVED_UNREFERENCED_STEWARDGOODS = (
+    "/static/stewardgoods/CertificateOfCompletion_Become-a-DevOps-Engineer.pdf",
+    "/static/stewardgoods/JacobStephens-CompTIA-A-plus-certificate.pdf",
+    "/static/stewardgoods/agile-flowchart.jpg",
+    "/static/stewardgoods/pixel-cases/casebus-harper-1.jpg",
+    "/static/stewardgoods/pixel-cases/casebus-harper-2.jpg",
+    "/static/stewardgoods/pixel-cases/casebus-harper-3.jpg",
+    "/static/stewardgoods/pixel-cases/casebus-harper-4.jpg",
+    "/static/stewardgoods/pixel-cases/casebus-harper-5.jpg",
+    "/static/stewardgoods/pixel-cases/google-pixelsnap-case.jpg",
+    "/static/stewardgoods/pixel-cases/snakehive-metro-wallet-black-open.jpg",
+)
+
 
 class LinkExtractor(HTMLParser):
-    """Collect src and href values from authored HTML."""
+    """Collect asset src/href URLs and social image meta URLs from authored HTML."""
 
     def __init__(self, html):
         super().__init__(convert_charrefs=True)
         self.urls = []
+        self.social_images = []
         self.feed(html)
         self.close()
 
     def handle_starttag(self, tag, attrs):
+        attr_map = dict(attrs)
         for name, value in attrs:
             if name in ("src", "href") and value:
                 self.urls.append(value)
+        if tag == "meta":
+            key = (attr_map.get("property") or attr_map.get("name") or "").lower()
+            content = attr_map.get("content")
+            if key in ("og:image", "twitter:image") and content:
+                self.social_images.append(content)
 
 
 def parse_301_rewrite_rules(htaccess_text):
@@ -182,6 +332,13 @@ class PostAssetColocationTests(unittest.TestCase):
             self.assertEqual(clean.returncode, 0, clean.stdout + clean.stderr)
 
     def test_migrated_posts_use_colocated_assets_and_remove_old_static_dirs(self):
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        for post in manifest["posts"]:
+            slug = post["slug"]
+            with self.subTest(registered_slug=slug):
+                html_path = ROOT / "posts" / slug / "index.html"
+                self.assertNotIn("/static/", html_path.read_text(encoding="utf-8"))
+
         for slug in MIGRATED_POSTS:
             with self.subTest(slug=slug):
                 html_path = ROOT / "posts" / slug / "index.html"
@@ -195,6 +352,17 @@ class PostAssetColocationTests(unittest.TestCase):
                     rel = url.lstrip("/")
                     self.assertTrue((ROOT / rel).is_file(), f"missing colocated asset: {rel}")
 
+                if slug in SOCIAL_META_POSTS:
+                    self.assertEqual(len(extractor.social_images), 2, f"{slug}: expected og:image and twitter:image")
+                expected_meta_prefix = f"{SITE_ORIGIN}{prefix}"
+                for meta_url in extractor.social_images:
+                    self.assertTrue(
+                        meta_url.startswith(expected_meta_prefix),
+                        f"{slug}: social image {meta_url!r} must start with {expected_meta_prefix!r}",
+                    )
+                    rel = meta_url.removeprefix(f"{SITE_ORIGIN}/")
+                    self.assertTrue((ROOT / rel).is_file(), f"missing social image asset: {rel}")
+
         for dir_name in REMOVED_STATIC_DIRS:
             with self.subTest(static_dir=dir_name):
                 self.assertFalse((ROOT / "static" / dir_name).exists())
@@ -207,9 +375,9 @@ class PostAssetColocationTests(unittest.TestCase):
                 self.assertEqual(actual_target, expected_target)
                 self.assertTrue((ROOT / expected_target.lstrip("/")).is_file())
 
-        self.assertIsNone(
-            resolve_redirect(rules, "/static/stewardgoods/pixel-cases/bellroy-mag-wallet.jpg")
-        )
+        for old_path in REMOVED_UNREFERENCED_STEWARDGOODS:
+            with self.subTest(unreferenced_path=old_path):
+                self.assertIsNone(resolve_redirect(rules, old_path))
 
 
 if __name__ == "__main__":
