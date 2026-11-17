@@ -2,16 +2,18 @@
  * Theme controller for jacobstephens.net
  *
  * Default: follow prefers-color-scheme (no data-theme attribute).
- * Toggle: pin light or dark in localStorage and set data-theme.
+ * Toggle: pin light or dark for this page and persist when storage is available.
  * Storage key: "theme" → "light" | "dark" | null (system)
  *
- * The FOUC-prevention bootstrap in each page <head> must stay in sync with
- * STORAGE_KEY and the valid values below.
+ * Load once, synchronously in <head> before stylesheets. This module owns
+ * initialization, the active preference, and all theme presentation.
  */
 (function () {
   var STORAGE_KEY = 'theme';
   var THEME_LIGHT = 'light';
   var THEME_DARK = 'dark';
+  var preference = readStored();
+  var documentReady = false;
 
   function systemPrefersDark() {
     return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -19,27 +21,28 @@
 
   function readStored() {
     try {
-      var v = localStorage.getItem(STORAGE_KEY);
-      if (v === THEME_LIGHT || v === THEME_DARK) return v;
+      return normalizePreference(localStorage.getItem(STORAGE_KEY));
     } catch (e) { /* private mode / blocked storage */ }
     return null;
   }
 
+  function normalizePreference(value) {
+    return value === THEME_LIGHT || value === THEME_DARK ? value : null;
+  }
+
   function writeStored(value) {
     try {
-      if (value === null) localStorage.removeItem(STORAGE_KEY);
-      else localStorage.setItem(STORAGE_KEY, value);
-    } catch (e) { /* ignore */ }
+      localStorage.setItem(STORAGE_KEY, value);
+    } catch (e) { /* The in-page choice remains effective without persistence. */ }
   }
 
   /** Effective theme the page is showing right now. */
   function effectiveTheme() {
-    var stored = readStored();
-    if (stored) return stored;
+    if (preference) return preference;
     return systemPrefersDark() ? THEME_DARK : THEME_LIGHT;
   }
 
-  function applyTheme(preference) {
+  function applyTheme() {
     var root = document.documentElement;
     if (preference === THEME_LIGHT || preference === THEME_DARK) {
       root.setAttribute('data-theme', preference);
@@ -50,8 +53,10 @@
       root.removeAttribute('data-theme');
       root.style.colorScheme = '';
     }
-    updateMetaThemeColor();
-    updateToggleLabels();
+    if (documentReady) {
+      updateMetaThemeColor();
+      updateToggleLabels();
+    }
   }
 
   function updateMetaThemeColor() {
@@ -65,9 +70,9 @@
   }
 
   function toggleTheme() {
-    var next = effectiveTheme() === THEME_DARK ? THEME_LIGHT : THEME_DARK;
-    writeStored(next);
-    applyTheme(next);
+    preference = effectiveTheme() === THEME_DARK ? THEME_LIGHT : THEME_DARK;
+    writeStored(preference);
+    applyTheme();
   }
 
   function createToggleButton() {
@@ -100,11 +105,10 @@
     if (document.querySelector('.theme-toggle')) return;
     var btn = createToggleButton();
     document.body.appendChild(btn);
-    updateToggleLabels();
   }
 
   // Apply stored preference as early as this script runs.
-  applyTheme(readStored());
+  applyTheme();
 
   function onReady(fn) {
     if (document.readyState === 'loading') {
@@ -115,7 +119,9 @@
   }
 
   onReady(function () {
+    documentReady = true;
     mountToggle();
+    applyTheme();
     // Enable transitions only after first paint so the initial theme doesn't animate in.
     requestAnimationFrame(function () {
       document.documentElement.classList.add('theme-ready');
@@ -126,8 +132,8 @@
   if (window.matchMedia) {
     var mql = window.matchMedia('(prefers-color-scheme: dark)');
     var onChange = function () {
-      if (!readStored()) {
-        applyTheme(null);
+      if (!preference) {
+        applyTheme();
       }
     };
     if (typeof mql.addEventListener === 'function') {
@@ -140,7 +146,8 @@
   // Cross-tab sync
   window.addEventListener('storage', function (e) {
     if (e.key === STORAGE_KEY) {
-      applyTheme(readStored());
+      preference = normalizePreference(e.newValue);
+      applyTheme();
     }
   });
 })();

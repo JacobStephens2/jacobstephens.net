@@ -2,16 +2,9 @@
 <html lang="en">
 
 <head>
-    <script>
-      (function () {
-        try {
-          var t = localStorage.getItem('theme');
-          if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t);
-        } catch (e) {}
-      })();
-    </script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="/styles/theme.js"></script>
     <meta name="theme-color" content="#fef9ee">
     <title>A Field Guide to 33 Interior Design Styles | Jacob Stephens' Personal Site</title>
     <meta name="description" content="A visual field guide to 33 interior design styles, from Art Nouveau and Mid-Century Modern to Japandi, English Country, Brutalism, and Maximalism.">
@@ -30,7 +23,6 @@
     <link rel="icon" href="/favicon-32x32.png" type="image/png">
     <link rel="stylesheet" href="/styles/reset.css">
     <link rel="stylesheet" href="/styles/style.css?v=23">
-    <script src="/styles/theme.js" defer></script>
 
     <style>
       .style-intro {

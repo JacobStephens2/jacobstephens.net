@@ -2,16 +2,9 @@
 <html lang="en">
 
 <head>
-    <script>
-      (function () {
-        try {
-          var t = localStorage.getItem('theme');
-          if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t);
-        } catch (e) {}
-      })();
-    </script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="/styles/theme.js"></script>
     <meta name="theme-color" content="#fef9ee">
     <title>The Price of a Point: Looking for New Strategy in Tigris &amp; Euphrates | Jacob Stephens' Personal Site</title>
     <meta name="description" content="A lunch conversation with a top-ranked player turned into a question: can a machine reason its way to a new idea about a board game? Four exact results about the scoring rule, and an honest account of where the math stops.">
@@ -28,7 +21,6 @@
     <link rel="icon" href="/favicon-32x32.png" type="image/png">
     <link rel="stylesheet" href="/styles/reset.css">
     <link rel="stylesheet" href="/styles/style.css?v=23">
-    <script src="/styles/theme.js" defer></script>
 
     <style>
       /* The symbol key draws its rules with --viz-grid but sits outside any
