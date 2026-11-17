@@ -623,6 +623,12 @@ class PublishCommands(unittest.TestCase):
             (POST.replace("</head>", "<style>body{background-image:image-set('/static/image.jpg' 1x)}</style></head>"), "/static/"),
             (POST.replace("</head>", "<style>body{background-image:-webkit-image-set('/posts/first/hero.jpg' 1x)}</style></head>"), "escapes /posts/second/"),
             (POST.replace("</head>", "<style>body{color:rgb(0,0,0);\\\nbackground:url('/static/image.jpg')}</style></head>"), "/static/"),
+            (POST.replace("</head>", "<style>body{background:url(/styles/x\\31 /../../static/image.jpg)}</style></head>"), "traversal"),
+            (POST.replace("</head>", "<style>body{background:url(/styles/\\72 eset.css/../../static/image.jpg)}</style></head>"), "traversal"),
+            (POST.replace("</head>", "<style>body{background-image:image-set(url(\"present.jpg\" foo) 1x, \"/static/image.jpg\" 2x)}</style></head>"), "/static/"),
+            (POST.replace("</head>", "<style>body{background-image:image-set(url(present.jpg foo) 1x, \"/static/image.jpg\" 2x)}</style></head>"), "/static/"),
+            (POST.replace("</head>", "<style>body{background-image:image-set(url(\"present.jpg\" (foo)) 1x, \"/posts/first/hero.jpg\" 2x)}</style></head>"), "escapes /posts/second/"),
+            (POST.replace("</head>", "<style>body{background-image:image-set(src(\"present.jpg\" foo) 1x, \"/static/image.jpg\" 2x)}</style></head>"), "/static/"),
             (POST.replace("</body></html>\n", "<style>body{background:url('/static/image.jpg')}"), "/static/"),
         ]
         for html, message in cases:

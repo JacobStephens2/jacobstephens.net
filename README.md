@@ -89,7 +89,8 @@ python3 tools/publish.py check
    `posts/my-new-post/` (such as `../` from a nested page) but may not traverse
    outside the post directory. Shared site chrome (`/styles/...`, `/fonts/...`,
    `/icons/...`, `/favicon-32x32.png`), site routes (`/`, `/posts/`, `/about/`,
-   `/projects/`, `/message/`, `/privacy-policy`), external URLs, and page links
+   `/projects/`, `/categories/`, `/message/`, `/privacy-policy`, and their
+   no-trailing-slash / `index.html` variants), external URLs, and page links
    to registered `/posts/<other-slug>/` pages are allowed; `/static/` links,
    missing post-local targets, cross-post non-page assets, and path traversal
    outside `posts/my-new-post/` fail validation.
@@ -152,7 +153,7 @@ Python 3.10+ is required. Tests use only the standard library and disposable sit
 ```sh
 python3 -m unittest discover -s tests -v
 python3 -m unittest discover -s tests -p test_publish.py -k transitions -v
-python3 -m py_compile tools/publish.py tests/test_publish.py
+python3 -m py_compile tools/publish.py tests/test_publish.py tests/test_post_assets.py
 python3 tools/publish.py build
 python3 tools/publish.py check
 ```

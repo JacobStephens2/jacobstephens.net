@@ -473,6 +473,16 @@ def _skip_css_ws_and_comments(css_text, pos):
     return pos
 
 
+def _advance_css_escape(css_text, pos, allow_newline=False):
+    """Return index after a CSS backslash escape, or None if not a valid escape."""
+    if pos + 1 >= len(css_text):
+        return pos + 1 if allow_newline else None
+    if not allow_newline and css_text[pos + 1] in "\n\r\f":
+        return None
+    match = CSS_ESCAPE_RE.match(css_text, pos)
+    return match.end() if match else pos + 1
+
+
 def _consume_css_string(css_text, pos):
     quote = css_text[pos]
     pos += 1
@@ -481,10 +491,7 @@ def _consume_css_string(css_text, pos):
     while pos < length:
         ch = css_text[pos]
         if ch == "\\":
-            if pos + 1 < length:
-                pos += 3 if css_text[pos + 1:pos + 3] == "\r\n" else 2
-            else:
-                pos += 1
+            pos = _advance_css_escape(css_text, pos, allow_newline=True)
         elif ch == quote:
             raw = css_text[start:pos]
             return decode_css_escapes(raw), pos + 1
@@ -501,18 +508,20 @@ def _consume_css_unquoted_url(css_text, pos):
     while pos < length:
         ch = css_text[pos]
         if ch == "\\":
-            pos += 2 if pos + 1 < length else 1
+            next_pos = _advance_css_escape(css_text, pos)
+            pos = next_pos if next_pos is not None else pos + 1
         elif ch == ")":
-            return decode_css_escapes(css_text[start:pos]), pos + 1
+            return decode_css_escapes(css_text[start:pos]), pos + 1, True
         elif ch in CSS_WS:
             raw = css_text[start:pos]
             pos = _skip_css_ws_and_comments(css_text, pos)
-            if pos < length and css_text[pos] == ")":
+            closed = pos < length and css_text[pos] == ")"
+            if closed:
                 pos += 1
-            return decode_css_escapes(raw), pos
+            return decode_css_escapes(raw), pos, closed
         else:
             pos += 1
-    return decode_css_escapes(css_text[start:pos]), pos
+    return decode_css_escapes(css_text[start:pos]), pos, False
 
 
 def _consume_css_ident(css_text, pos):
@@ -521,12 +530,11 @@ def _consume_css_ident(css_text, pos):
     while pos < length:
         ch = css_text[pos]
         if ch == "\\":
-            if pos + 1 < length and css_text[pos + 1] not in "\n\r\f":
-                match = CSS_ESCAPE_RE.match(css_text, pos)
-                if match:
-                    pos = match.end()
-                    continue
-            break
+            next_pos = _advance_css_escape(css_text, pos)
+            if next_pos is None:
+                break
+            pos = next_pos
+            continue
         if ch.isalnum() or ch in "_-" or ord(ch) >= 0x80:
             pos += 1
         else:
@@ -570,22 +578,26 @@ def extract_css_urls(css_text):
             expect_import_url = False
             pos += 1
         elif ch.isalpha() or ch in "_-" or ord(ch) >= 0x80 or (
-            ch == "\\" and pos + 1 < length and css_text[pos + 1] not in "\n\r\f"
+            ch == "\\" and _advance_css_escape(css_text, pos) is not None
         ):
             ident, pos = _consume_css_ident(css_text, pos)
             expect_import_url = False
             if pos < length and css_text[pos] == "(":
                 if ident in ("url", "src"):
+                    paren_depth += 1
                     pos = _skip_css_ws_and_comments(css_text, pos + 1)
                     if pos < length and css_text[pos] in ("'", '"'):
                         val, pos = _consume_css_string(css_text, pos)
                         pos = _skip_css_ws_and_comments(css_text, pos)
                         if pos < length and css_text[pos] == ")":
+                            paren_depth -= 1
                             pos += 1
                         if val is not None:
                             yield val
                     else:
-                        val, pos = _consume_css_unquoted_url(css_text, pos)
+                        val, pos, closed = _consume_css_unquoted_url(css_text, pos)
+                        if closed:
+                            paren_depth -= 1
                         yield val
                 elif ident in ("image-set", "-webkit-image-set"):
                     paren_depth += 1
@@ -615,10 +627,7 @@ class ReferenceParser(HTMLParser):
         self._style_chunks = []
         self.feed(html)
         self.close()
-        if self._in_style:
-            self._add_css("".join(self._style_chunks))
-            self._in_style = False
-            self._style_chunks = []
+        self._flush_style()
 
     def parse_comment(self, i, report=True):
         rawdata = self.rawdata
@@ -636,6 +645,12 @@ class ReferenceParser(HTMLParser):
     def _add_css(self, css_text):
         for url in extract_css_urls(css_text):
             self._add(url)
+
+    def _flush_style(self):
+        if self._in_style:
+            self._add_css("".join(self._style_chunks))
+            self._in_style = False
+            self._style_chunks = []
 
     def handle_starttag(self, tag, attrs):
         # HTML5 keeps the first occurrence of duplicate attributes on an element.
@@ -694,10 +709,8 @@ class ReferenceParser(HTMLParser):
                 self._add(target, is_page_link=True, allow_local_dir=True)
 
     def handle_endtag(self, tag):
-        if tag == "style" and self._in_style:
-            self._add_css("".join(self._style_chunks))
-            self._in_style = False
-            self._style_chunks = []
+        if tag == "style":
+            self._flush_style()
 
     def handle_data(self, data):
         if self._in_style:
