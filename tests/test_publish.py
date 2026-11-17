@@ -599,6 +599,8 @@ class PublishCommands(unittest.TestCase):
             (POST.replace("</head>", "<meta http-equiv='refresh' content='0,url=/static/image.jpg'></head>"), "/static/"),
             (POST.replace("</head>", "<meta http-equiv='refresh' content='0 url=/static/image.jpg'></head>"), "/static/"),
             (POST.replace("</head>", "<meta http-equiv='refresh' content='0; /posts/first/hero.jpg'></head>"), "escapes /posts/second/"),
+            (POST.replace("</head>", "<meta http-equiv='refresh' content='0.1.2;url=/static/image.jpg'></head>"), "/static/"),
+            (POST.replace("</head>", "<meta http-equiv='refresh' content='0..;url=/posts/first/hero.jpg'></head>"), "escapes /posts/second/"),
             (POST.replace("</head>", "<meta property='article:tag' name='twitter:image' content='/static/image.jpg'></head>"), "/static/"),
             (POST.replace("<body>", "<body background='/static/image.jpg'>"), "/static/"),
             (POST.replace("</head>", "<link rel='preload' as='image' imagesrcset='/static/image.jpg 1x'></head>"), "/static/"),

@@ -428,7 +428,7 @@ def parse_refresh_url(content):
             return None
     elif index < len(text) and text[index] == ".":
         index += 1
-        while index < len(text) and text[index].isdigit():
+        while index < len(text) and (text[index].isdigit() or text[index] == "."):
             index += 1
     if index >= len(text) or text[index] not in ";, \t\n\f\r":
         return None
