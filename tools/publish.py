@@ -55,9 +55,8 @@ URL_META_KEYS = frozenset({
     "og:video", "og:video:url", "og:video:secure_url",
 })
 PAGE_META_KEYS = frozenset({"og:url", "twitter:url"})
-CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
-CSS_URL_RE = re.compile(r"""url\(\s*(?:'([^']*)'|"([^"]*)"|([^)"'\s]+))\s*\)""", re.IGNORECASE)
-CSS_IMPORT_RE = re.compile(r"""@import\s+(?:'([^']*)'|"([^"]*)")""", re.IGNORECASE)
+CSS_ESCAPE_RE = re.compile(r"\\(?:([0-9a-fA-F]{1,6})(?:\r\n|[ \t\n\r\f])?|(\r\n|[\n\r\f])|(.))", re.DOTALL)
+CSS_WS = " \t\n\r\f"
 REFRESH_URL_PREFIX = re.compile(r"url\s*=\s*", re.IGNORECASE)
 ABRUPT_COMMENT_CLOSE = re.compile(r"-?>")
 MAX_SRCDOC_DEPTH = 16
@@ -445,12 +444,156 @@ def parse_refresh_url(content):
     return rest.rstrip(" \t\n\f\r")
 
 
+def decode_css_escapes(text):
+    """Decode CSS backslash escapes per CSS Syntax Level 3."""
+    def replace(match):
+        hex_digits, line_break, escaped = match.groups()
+        if hex_digits is not None:
+            code = int(hex_digits, 16)
+            if code == 0 or code > 0x10FFFF or 0xD800 <= code <= 0xDFFF:
+                return "\ufffd"
+            return chr(code)
+        if line_break is not None:
+            return ""
+        return escaped
+
+    return CSS_ESCAPE_RE.sub(replace, text)
+
+
+def _skip_css_ws_and_comments(css_text, pos):
+    length = len(css_text)
+    while pos < length:
+        if css_text[pos] in CSS_WS:
+            pos += 1
+        elif css_text.startswith("/*", pos):
+            end = css_text.find("*/", pos + 2)
+            pos = length if end == -1 else end + 2
+        else:
+            break
+    return pos
+
+
+def _consume_css_string(css_text, pos):
+    quote = css_text[pos]
+    pos += 1
+    start = pos
+    length = len(css_text)
+    while pos < length:
+        ch = css_text[pos]
+        if ch == "\\":
+            if pos + 1 < length:
+                pos += 3 if css_text[pos + 1:pos + 3] == "\r\n" else 2
+            else:
+                pos += 1
+        elif ch == quote:
+            raw = css_text[start:pos]
+            return decode_css_escapes(raw), pos + 1
+        elif ch in "\n\r\f":
+            return None, pos
+        else:
+            pos += 1
+    return decode_css_escapes(css_text[start:pos]), pos
+
+
+def _consume_css_unquoted_url(css_text, pos):
+    start = pos
+    length = len(css_text)
+    while pos < length:
+        ch = css_text[pos]
+        if ch == "\\":
+            pos += 2 if pos + 1 < length else 1
+        elif ch == ")":
+            return decode_css_escapes(css_text[start:pos]), pos + 1
+        elif ch in CSS_WS:
+            raw = css_text[start:pos]
+            pos = _skip_css_ws_and_comments(css_text, pos)
+            if pos < length and css_text[pos] == ")":
+                pos += 1
+            return decode_css_escapes(raw), pos
+        else:
+            pos += 1
+    return decode_css_escapes(css_text[start:pos]), pos
+
+
+def _consume_css_ident(css_text, pos):
+    start = pos
+    length = len(css_text)
+    while pos < length:
+        ch = css_text[pos]
+        if ch == "\\":
+            if pos + 1 < length and css_text[pos + 1] not in "\n\r\f":
+                match = CSS_ESCAPE_RE.match(css_text, pos)
+                if match:
+                    pos = match.end()
+                    continue
+            break
+        if ch.isalnum() or ch in "_-" or ord(ch) >= 0x80:
+            pos += 1
+        else:
+            break
+    return decode_css_escapes(css_text[start:pos]).lower(), pos
+
+
 def extract_css_urls(css_text):
-    """Yield URLs from CSS url(...) and @import string rules, ignoring comments."""
-    cleaned = CSS_COMMENT_RE.sub(" ", css_text)
-    for pattern in (CSS_URL_RE, CSS_IMPORT_RE):
-        for match in pattern.finditer(cleaned):
-            yield next(group for group in match.groups() if group is not None)
+    """Yield URLs from CSS url()/src(), @import, and image-set() rules."""
+    pos = 0
+    length = len(css_text)
+    expect_import_url = False
+    paren_depth = 0
+    image_set_depths = []
+
+    while pos < length:
+        pos = _skip_css_ws_and_comments(css_text, pos)
+        if pos >= length:
+            break
+        ch = css_text[pos]
+        if ch in ("'", '"'):
+            val, pos = _consume_css_string(css_text, pos)
+            if val is not None and (expect_import_url or (image_set_depths and paren_depth == image_set_depths[-1])):
+                yield val
+            expect_import_url = False
+        elif ch == "@":
+            pos += 1
+            ident, pos = _consume_css_ident(css_text, pos)
+            expect_import_url = ident == "import"
+        elif ch == "(":
+            paren_depth += 1
+            pos += 1
+            expect_import_url = False
+        elif ch == ")":
+            if image_set_depths and paren_depth == image_set_depths[-1]:
+                image_set_depths.pop()
+            paren_depth = max(0, paren_depth - 1)
+            pos += 1
+            expect_import_url = False
+        elif ch in ";{}":
+            expect_import_url = False
+            pos += 1
+        elif ch.isalpha() or ch in "_-" or ord(ch) >= 0x80 or (
+            ch == "\\" and pos + 1 < length and css_text[pos + 1] not in "\n\r\f"
+        ):
+            ident, pos = _consume_css_ident(css_text, pos)
+            expect_import_url = False
+            if pos < length and css_text[pos] == "(":
+                if ident in ("url", "src"):
+                    pos = _skip_css_ws_and_comments(css_text, pos + 1)
+                    if pos < length and css_text[pos] in ("'", '"'):
+                        val, pos = _consume_css_string(css_text, pos)
+                        pos = _skip_css_ws_and_comments(css_text, pos)
+                        if pos < length and css_text[pos] == ")":
+                            pos += 1
+                        if val is not None:
+                            yield val
+                    else:
+                        val, pos = _consume_css_unquoted_url(css_text, pos)
+                        yield val
+                elif ident in ("image-set", "-webkit-image-set"):
+                    paren_depth += 1
+                    image_set_depths.append(paren_depth)
+                    pos += 1
+        else:
+            pos += 1
+            expect_import_url = False
 
 
 @dataclass(frozen=True)
@@ -472,6 +615,10 @@ class ReferenceParser(HTMLParser):
         self._style_chunks = []
         self.feed(html)
         self.close()
+        if self._in_style:
+            self._add_css("".join(self._style_chunks))
+            self._in_style = False
+            self._style_chunks = []
 
     def parse_comment(self, i, report=True):
         rawdata = self.rawdata

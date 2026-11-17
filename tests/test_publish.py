@@ -544,6 +544,7 @@ class PublishCommands(unittest.TestCase):
             "<a href='model-council/research.md'>Markdown</a>"
             "<img src='hero.jpg?v=1' srcset='/posts/first/hero.jpg 1x'>"
             "<img srcset='data:image/png;base64,iVBORw0KGgo= 1x, hero.jpg 2x'>"
+            "<style>/* url('/static/comment.jpg') */ body{background:url('hero.jpg')}</style>"
             "<a href='spaced%20file.pdf'>PDF</a>"
             "<a href='#local'>Anchor</a>"
             "<a href='mailto:jacob@stephens.page'>Email</a>"
@@ -601,6 +602,28 @@ class PublishCommands(unittest.TestCase):
             (POST.replace("<p>", "<form action='/static/image.jpg'></form><p>"), "/static/"),
             (POST.replace("<p>", "<a href='present.jpg' ping='/static/image.jpg'>p</a><p>"), "/static/"),
             (POST.replace("</head>", "<base href='/styles/style.css'></head>").replace("<p>", "<img src='present.jpg'><p>"), "<base href>"),
+        ]
+        for html, message in cases:
+            self.write("posts/second/index.html", html)
+            for args in [("check",), ("build",), ("draft", "first"), ("publish", "first")]:
+                with self.subTest(html=html, args=args):
+                    self.assert_rejected_without_writes(*args, message=message)
+
+    def test_css_parser_and_unclosed_style_bypasses_fail_without_writes(self):
+        self.write("static/image.jpg", "legacy")
+        self.write("posts/first/hero.jpg", "first-hero")
+        self.write("posts/second/present.jpg", "ok")
+        cases = [
+            (POST.replace("</head>", "<style>.n::before{content:\"/*\"}body{background:url('/static/image.jpg')}/* */</style></head>"), "/static/"),
+            (POST.replace("<p>", "<div style=\"content:'/*';background:url('/posts/first/hero.jpg');/* */\"></div><p>"), "escapes /posts/second/"),
+            (POST.replace("</head>", "<style>.n::before{content:\"/*\"}@import '/static/legacy.css';/* */</style></head>"), "/static/"),
+            (POST.replace("</head>", "<style>body{background:\\75rl('/static/image.jpg')}</style></head>"), "/static/"),
+            (POST.replace("</head>", "<style>@\\69mport '/static/legacy.css';</style></head>"), "/static/"),
+            (POST.replace("</head>", "<style>body{background:url('https://j\\61 cobstephens.net/static/image.jpg')}</style></head>"), "/static/"),
+            (POST.replace("</head>", "<style>body{background-image:image-set('/static/image.jpg' 1x)}</style></head>"), "/static/"),
+            (POST.replace("</head>", "<style>body{background-image:-webkit-image-set('/posts/first/hero.jpg' 1x)}</style></head>"), "escapes /posts/second/"),
+            (POST.replace("</head>", "<style>body{color:rgb(0,0,0);\\\nbackground:url('/static/image.jpg')}</style></head>"), "/static/"),
+            (POST.replace("</body></html>\n", "<style>body{background:url('/static/image.jpg')}"), "/static/"),
         ]
         for html, message in cases:
             self.write("posts/second/index.html", html)
