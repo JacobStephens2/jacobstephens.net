@@ -396,8 +396,13 @@ class PublishCommands(unittest.TestCase):
             ("posts/second/index.html", POST.replace("<p>", '<img srcset="https://www.jacobstephens.net/static/image.jpg 1x"><p>')),
             ("posts/second/index.html", POST.replace("<p>", "<img src='//jacobstephens.net/static/image.jpg'><p>")),
             ("posts/second/index.html", POST.replace("<p>", "<img src='/%73tatic/image.jpg'><p>")),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='https://jacobstephens.net\\static\\image.jpg'><p>")),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='https://jacobstephens.net./static/image.jpg'><p>")),
+            ("posts/second/index.html", POST.replace("<head>", "<head><style>@import '/static/legacy.css';</style>")),
+            ("posts/second/index.html", POST.replace("</head>", '<meta property="og:image" content="https://jacobstephens.net/static/image.jpg" content="present.jpg"></head>')),
             ("posts/second/model-council/index.html", POST.replace("<p>", "<img src='/static/image.jpg'><p>")),
         ]
+        self.write("posts/second/present.jpg", "ok")
         for rel_path, html in cases:
             self.write("posts/second/index.html", POST)
             nested = self.root / "posts/second/model-council/index.html"
@@ -429,6 +434,7 @@ class PublishCommands(unittest.TestCase):
             ("posts/second/index.html", POST.replace("<p>", "<a href='empty-dir/'>no index</a><p>"), "missing directory index"),
             ("posts/second/index.html", POST.replace("<p>", "<img src='nested/'><p>"), "directory, not a file"),
             ("posts/second/index.html", POST.replace("<p>", "<a href='present.jpg/'>bad slash</a><p>"), "does not resolve to a directory"),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='/posts/second/present.jpg/.'> <p>"), "does not resolve to a directory"),
         ]
         for rel_path, html, message in cases:
             self.write("posts/second/index.html", POST)
@@ -445,6 +451,19 @@ class PublishCommands(unittest.TestCase):
             with self.subTest(symlink=True, args=args):
                 self.assert_rejected_without_writes(*args, message="symlink")
 
+    @unittest.skipIf(os.geteuid() == 0, "permission failures require an unprivileged process")
+    def test_unreadable_post_subdirectory_fails_without_writes(self):
+        hidden = self.root / "posts/second/hidden"
+        hidden.mkdir()
+        (hidden / "bad.html").write_text(POST.replace("<p>", "<img src='/static/leak.jpg'><p>"))
+        hidden.chmod(0o000)
+        try:
+            for args in [("check",), ("build",), ("draft", "first"), ("publish", "first")]:
+                with self.subTest(args=args):
+                    self.assert_rejected_without_writes(*args, message="cannot inspect directory")
+        finally:
+            hidden.chmod(0o755)
+
     def test_cross_post_non_page_assets_and_escaping_links_fail_without_writes(self):
         self.write("posts/first/hero.jpg", "first-hero")
         self.write("posts/first/notes.pdf", "pdf")
@@ -456,6 +475,9 @@ class PublishCommands(unittest.TestCase):
             POST.replace("<p>", "<a href='/posts/first/hero.jpg'>hero</a><p>"),
             POST.replace("<p>", "<a href='https://jacobstephens.net/posts/first/notes.pdf'>pdf</a><p>"),
             POST.replace("</head>", '<meta property="og:image" content="https://jacobstephens.net/posts/first/hero.jpg"></head>'),
+            POST.replace("<p>", "<img src='//jacobstephens.net\\posts\\first\\hero.jpg'><p>"),
+            POST.replace("<p>", "<a href='/posts/first/index.html/.'>dot</a><p>"),
+            POST.replace("<p>", "<link rel='stylesheet' href='/posts/first/' rel='canonical'><p>"),
             POST.replace("<p>", "<img src='/posts/first/'><p>"),
             POST.replace("<p>", "<script src='/posts/first/'></script><p>"),
             POST.replace("<p>", "<a href='/posts/first/model-council/'>sub</a><p>"),
@@ -464,6 +486,7 @@ class PublishCommands(unittest.TestCase):
             POST.replace("<p>", "<a href='/about/jacob_laughing.jpeg'>pic</a><p>"),
             POST.replace("<p>", "<a href='/posts.json'>manifest</a><p>"),
             POST.replace("<head>", "<head><style>body{background:url('/posts/first/hero.jpg')}</style>"),
+            POST.replace("<head>", "<head><style>@import '/posts/first/style.css';</style>"),
         ]
         for html in cases:
             self.write("posts/second/index.html", html)
