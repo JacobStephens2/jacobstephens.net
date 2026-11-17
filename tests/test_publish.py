@@ -33,6 +33,9 @@ AuthType Basic
 AuthName "jacobstephens.net draft preview"
 AuthUserFile /var/www/.htpasswd-drafts
 Require valid-user
+<IfModule mod_headers.c>
+    Header always set X-Robots-Tag "noindex, nofollow"
+</IfModule>
 """
 
 
@@ -368,6 +371,310 @@ class PublishCommands(unittest.TestCase):
             self.root.chmod(0o755)
         self.assert_success("build")
         self.assert_success("check")
+
+    def test_legacy_draft_gate_without_x_robots_tag_is_upgraded(self):
+        self.data["posts"][0]["status"] = "draft"
+        self.write_manifest()
+        self.assert_success("build")
+        legacy_gate = "\n".join(GATE.splitlines()[:6]) + "\n"
+        self.write("posts/first/.htaccess", legacy_gate)
+        self.assert_rejected_without_writes("check", message="STALE")
+        self.assert_success("build")
+        actual = (self.root / "posts/first/.htaccess").read_text()
+        self.assertEqual(actual, GATE)
+        self.assertIn("<IfModule mod_headers.c>", actual)
+        self.assertIn('Header always set X-Robots-Tag "noindex, nofollow"', actual)
+        self.assert_success("check")
+
+    def test_static_references_in_post_and_nested_html_fail_without_writes(self):
+        self.write("static/image.jpg", "legacy")
+        cases = [
+            ("posts/second/index.html", POST.replace("<p>", "<img src='/static/image.jpg'><p>")),
+            ("posts/second/index.html", POST.replace("<p>", "<a href='/static/image.jpg'>old</a><p>")),
+            ("posts/second/index.html", POST.replace("</head>", '<meta property="og:image" content="https://jacobstephens.net/static/image.jpg"></head>')),
+            ("posts/second/index.html", POST.replace("</head>", '<meta name="twitter:image" content="https://blog.stephens.page/static/image.jpg"></head>')),
+            ("posts/second/index.html", POST.replace("<p>", '<img srcset="https://www.jacobstephens.net/static/image.jpg 1x"><p>')),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='//jacobstephens.net/static/image.jpg'><p>")),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='/%73tatic/image.jpg'><p>")),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='https://jacobstephens.net\\static\\image.jpg'><p>")),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='https://jacobstephens.net./static/image.jpg'><p>")),
+            ("posts/second/index.html", POST.replace("<head>", "<head><style>@import '/static/legacy.css';</style>")),
+            ("posts/second/index.html", POST.replace("</head>", '<meta property="og:image" content="https://jacobstephens.net/static/image.jpg" content="present.jpg"></head>')),
+            ("posts/second/model-council/index.html", POST.replace("<p>", "<img src='/static/image.jpg'><p>")),
+        ]
+        self.write("posts/second/present.jpg", "ok")
+        for rel_path, html in cases:
+            self.write("posts/second/index.html", POST)
+            nested = self.root / "posts/second/model-council/index.html"
+            if nested.exists():
+                nested.unlink()
+            self.write(rel_path, html)
+            for args in [("check",), ("build",), ("draft", "first"), ("publish", "first")]:
+                with self.subTest(rel_path=rel_path, html=html, args=args):
+                    self.assert_rejected_without_writes(*args, message="/static/")
+
+    def test_path_traversal_and_missing_post_local_targets_fail_without_writes(self):
+        self.write("posts/first/secret.jpg", "first-secret")
+        self.write("posts/second/present.jpg", "ok")
+        self.write("posts/second/nested/page.html", POST)
+        self.write("posts/second/empty-dir/note.txt", "no index")
+        cases = [
+            ("posts/second/index.html", POST.replace("<p>", "<img src='../first/secret.jpg'><p>"), "traversal"),
+            ("posts/second/index.html", POST.replace("<p>", "<link rel='stylesheet' href='../../styles/style.css'><p>"), "traversal"),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='nested/../../first/secret.jpg'><p>"), "traversal"),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='/posts/second/../first/secret.jpg'><p>"), "traversal"),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='%2e%2e/first/secret.jpg'><p>"), "traversal"),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='..\\first\\secret.jpg'><p>"), "invalid character"),
+            ("posts/second/nested/page.html", POST.replace("<p>", "<img src='../../first/secret.jpg'><p>"), "traversal"),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='missing.jpg'><p>"), "missing post-local"),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='/posts/second/missing.jpg'><p>"), "missing post-local"),
+            ("posts/second/index.html", POST.replace("</head>", '<meta property="og:image" content="https://jacobstephens.net/posts/second/missing.jpg"></head>'), "missing post-local"),
+            ("posts/second/index.html", POST.replace("<p>", "<img srcset='present.jpg 1x, missing.jpg 2x'><p>"), "missing post-local"),
+            ("posts/second/index.html", POST.replace("<p>", "<a href='missing-dir/'>missing</a><p>"), "missing post-local"),
+            ("posts/second/index.html", POST.replace("<p>", "<a href='empty-dir/'>no index</a><p>"), "missing directory index"),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='nested/'><p>"), "directory, not a file"),
+            ("posts/second/index.html", POST.replace("<p>", "<a href='present.jpg/'>bad slash</a><p>"), "does not resolve to a directory"),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='/posts/second/present.jpg/.'> <p>"), "does not resolve to a directory"),
+        ]
+        for rel_path, html, message in cases:
+            self.write("posts/second/index.html", POST)
+            self.write("posts/second/nested/page.html", POST)
+            self.write(rel_path, html)
+            for args in [("check",), ("build",), ("draft", "first"), ("publish", "first")]:
+                with self.subTest(rel_path=rel_path, message=message, args=args):
+                    self.assert_rejected_without_writes(*args, message=message)
+
+        self.write("posts/second/index.html", POST.replace("<p>", "<img src='leak.jpg'><p>"))
+        symlink = self.root / "posts/second/leak.jpg"
+        symlink.symlink_to("../first/secret.jpg")
+        for args in [("check",), ("build",), ("draft", "first"), ("publish", "first")]:
+            with self.subTest(symlink=True, args=args):
+                self.assert_rejected_without_writes(*args, message="symlink")
+
+    @unittest.skipIf(os.geteuid() == 0, "permission failures require an unprivileged process")
+    def test_unreadable_post_subdirectory_fails_without_writes(self):
+        hidden = self.root / "posts/second/hidden"
+        hidden.mkdir()
+        (hidden / "bad.html").write_text(POST.replace("<p>", "<img src='/static/leak.jpg'><p>"))
+        hidden.chmod(0o000)
+        try:
+            for args in [("check",), ("build",), ("draft", "first"), ("publish", "first")]:
+                with self.subTest(args=args):
+                    self.assert_rejected_without_writes(*args, message="cannot inspect directory")
+        finally:
+            hidden.chmod(0o755)
+
+    def test_cross_post_non_page_assets_and_escaping_links_fail_without_writes(self):
+        self.write("posts/first/hero.jpg", "first-hero")
+        self.write("posts/first/notes.pdf", "pdf")
+        self.write("posts/first/model-council/index.html", POST)
+        self.write("posts/unregistered/index.html", POST)
+        self.write("about/jacob_laughing.jpeg", "about-img")
+        cases = [
+            POST.replace("<p>", "<img src='/posts/first/hero.jpg'><p>"),
+            POST.replace("<p>", "<a href='/posts/first/hero.jpg'>hero</a><p>"),
+            POST.replace("<p>", "<a href='https://jacobstephens.net/posts/first/notes.pdf'>pdf</a><p>"),
+            POST.replace("</head>", '<meta property="og:image" content="https://jacobstephens.net/posts/first/hero.jpg"></head>'),
+            POST.replace("<p>", "<img src='//jacobstephens.net\\posts\\first\\hero.jpg'><p>"),
+            POST.replace("<p>", "<a href='/posts/first/index.html/.'>dot</a><p>"),
+            POST.replace("<p>", "<link rel='stylesheet' href='/posts/first/' rel='canonical'><p>"),
+            POST.replace("<p>", "<img src='/posts/first/'><p>"),
+            POST.replace("<p>", "<script src='/posts/first/'></script><p>"),
+            POST.replace("<p>", "<a href='/posts/first/model-council/'>sub</a><p>"),
+            POST.replace("<p>", "<a href='/posts/unregistered/'>unregistered</a><p>"),
+            POST.replace("<p>", "<img src='/about/jacob_laughing.jpeg'><p>"),
+            POST.replace("<p>", "<a href='/about/jacob_laughing.jpeg'>pic</a><p>"),
+            POST.replace("<p>", "<a href='/posts.json'>manifest</a><p>"),
+            POST.replace("<head>", "<head><style>body{background:url('/posts/first/hero.jpg')}</style>"),
+            POST.replace("<head>", "<head><style>@import '/posts/first/style.css';</style>"),
+        ]
+        for html in cases:
+            self.write("posts/second/index.html", html)
+            for args in [("check",), ("build",), ("draft", "first"), ("publish", "first")]:
+                with self.subTest(html=html, args=args):
+                    self.assert_rejected_without_writes(*args, message="escapes /posts/second/")
+
+    def test_valid_post_local_assets_nested_pages_chrome_and_post_links_succeed(self):
+        self.write("posts/first/hero.jpg", "img")
+        self.write("posts/first/spaced file.pdf", "pdf")
+        self.write("posts/first/model-council/research.md", "# notes\n")
+        self.write("posts/first/model-council/index.html", (
+            "<!doctype html><html><head>"
+            "<script src='/styles/theme.js'></script>"
+            "<link rel='stylesheet' href='/styles/style.css?v=23'>"
+            "<title>Council</title></head><body>"
+            "<a href='/posts/first/'>Back</a>"
+            "<a href='sources/'>Sources</a>"
+            "<a href='sources/#fn-1'>Note</a>"
+            "<a href='research.md'>Raw</a>"
+            "</body></html>\n"
+        ))
+        self.write("posts/first/model-council/sources/index.html", (
+            "<!doctype html><html><head><title>Sources</title></head><body>"
+            "<a href='../'>Council</a>"
+            "<a href='../../'>Post</a>"
+            "<a href='../research.md'>Raw</a>"
+            "<a href='/posts/second/'>Other post</a>"
+            "</body></html>\n"
+        ))
+        rich_post = (
+            "<!doctype html><html><head>"
+            "<meta charset='UTF-8'>"
+            "<meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+            "<script src='/styles/theme.js'></script>"
+            "<meta property='og:image' content='https://jacobstephens.net/posts/first/hero.jpg'>"
+            "<meta name='twitter:image' content='https://jacobstephens.net/posts/first/hero.jpg'>"
+            "<link rel='icon' href='/favicon-32x32.png'>"
+            "<link rel='stylesheet' href='/styles/reset.css'>"
+            "<link rel='stylesheet' href='/styles/style.css?v=23'>"
+            "<script defer src='https://analytics.stephens.page/script.js'></script>"
+            "<title>Rich post</title></head><body>"
+            "<!-- <img src='/static/legacy.jpg'> -->"
+            "<a href='https://jacobstephens.net'>Home</a>"
+            "<a href='/'>Root</a>"
+            "<a href='/posts/'>All posts</a>"
+            "<a href='/posts/#general'>Category</a>"
+            "<a href='/about/'>About</a>"
+            "<a href='/privacy-policy'>Privacy</a>"
+            "<a href='/posts/second/'>Next post</a>"
+            "<a href='/posts/second/#part'>Next anchor</a>"
+            "<a href='https://jacobstephens.net/posts/second/'>Same-site post</a>"
+            "<a href='model-council/'>Council</a>"
+            "<a href='model-council/sources/'>Sources</a>"
+            "<a href='model-council/research.md'>Markdown</a>"
+            "<img src='hero.jpg?v=1' srcset='/posts/first/hero.jpg 1x'>"
+            "<img srcset='data:image/png;base64,iVBORw0KGgo= 1x, hero.jpg 2x'>"
+            "<style>/* url('/static/comment.jpg') */ body{background:url('hero.jpg')}</style>"
+            "<svg><title>Diagram</title><style>rect{fill:none}</style><image href='hero.jpg'/></svg>"
+            "<math><mi>x</mi></math>"
+            "<noscript><img src='hero.jpg'></noscript>"
+            "<a href='spaced%20file.pdf'>PDF</a>"
+            "<a href='#local'>Anchor</a>"
+            "<a href='mailto:jacob@stephens.page'>Email</a>"
+            "<a href='https://example.com/static/external.png'>External</a>"
+            "</body></html>\n"
+        )
+        self.write("posts/first/index.html", rich_post)
+        self.assert_success("build")
+        self.assert_success("check")
+        self.assert_success("draft", "first")
+        self.assertEqual((self.root / "posts/first/.htaccess").read_text(), GATE)
+        self.assert_success("check")
+        self.assert_success("publish", "first")
+        self.assert_success("check")
+
+    def test_url_normalization_and_idna_bypasses_fail_without_writes(self):
+        self.write("static/image.jpg", "legacy")
+        self.write("posts/first/hero.jpg", "first-hero")
+        self.write("posts/second/present.jpg", "ok")
+        cases = [
+            (POST.replace("<p>", "<img src='ht&#x09;tps://jacobstephens.net\\static\\image.jpg'><p>"), "/static/"),
+            (POST.replace("<p>", "<img src='ht&#x0a;tps://jacobstephens.net\\posts\\first\\hero.jpg'><p>"), "escapes /posts/second/"),
+            (POST.replace("<p>", "<img src='/&#x09;/jacobstephens.net\\static\\image.jpg'><p>"), "/static/"),
+            (POST.replace("<p>", "<img src='\x01https://jacobstephens.net\\static\\image.jpg'><p>"), "/static/"),
+            (POST.replace("<p>", "<img src='https://jacobstephens\u3002net/static/image.jpg'><p>"), "/static/"),
+            (POST.replace("<p>", "<img src='https://\uff4a\uff41\uff43\uff4f\uff42\uff53\uff54\uff45\uff50\uff48\uff45\uff4e\uff53.\uff4e\uff45\uff54/static/image.jpg'><p>"), "/static/"),
+            (POST.replace("<p>", "<img src='https://%6a%61%63%6f%62%73%74%65%70%68%65%6e%73.net/static/image.jpg'><p>"), "/static/"),
+            (POST.replace("<p>", "<img src='https://jacobstephens%2enet/static/image.jpg'><p>"), "/static/"),
+            (POST.replace("<p>", "<img src='//%6a%61%63%6f%62%73%74%65%70%68%65%6e%73.net/posts/first/hero.jpg'><p>"), "escapes /posts/second/"),
+            (POST.replace("<p>", "<img src='ht&#x09;tps://jacobstephens.net\\@evil.example/static/image.jpg'><p>"), "escapes /posts/second/"),
+        ]
+        for html, message in cases:
+            self.write("posts/second/index.html", html)
+            for args in [("check",), ("build",), ("draft", "first"), ("publish", "first")]:
+                with self.subTest(html=html, args=args):
+                    self.assert_rejected_without_writes(*args, message=message)
+
+    def test_html_parser_and_attribute_extraction_bypasses_fail_without_writes(self):
+        self.write("static/image.jpg", "legacy")
+        self.write("posts/first/hero.jpg", "first-hero")
+        self.write("posts/second/present.jpg", "ok")
+        cases = [
+            (POST.replace("<p>", "<!--><img src='/static/image.jpg'>--><p>"), "/static/"),
+            (POST.replace("<p>", "<!---><img src='/posts/first/hero.jpg'>--><p>"), "escapes /posts/second/"),
+            (POST.replace("<p>", "<iframe srcdoc=\"<img src='/static/image.jpg'>\"></iframe><p>"), "/static/"),
+            (POST.replace("<p>", "<iframe srcdoc=\"<iframe srcdoc='&lt;img src=/posts/first/hero.jpg&gt;'></iframe>\"></iframe><p>"), "escapes /posts/second/"),
+            (POST.replace("<p>", "<img srcset='data:, /static/image.jpg 2x'><p>"), "/static/"),
+            (POST.replace("<p>", "<img srcset='data:image/png;base64, /posts/first/hero.jpg 2x'><p>"), "escapes /posts/second/"),
+            (POST.replace("</head>", "<meta http-equiv='refresh' content='0,url=/static/image.jpg'></head>"), "/static/"),
+            (POST.replace("</head>", "<meta http-equiv='refresh' content='0 url=/static/image.jpg'></head>"), "/static/"),
+            (POST.replace("</head>", "<meta http-equiv='refresh' content='0; /posts/first/hero.jpg'></head>"), "escapes /posts/second/"),
+            (POST.replace("</head>", "<meta http-equiv='refresh' content='0.1.2;url=/static/image.jpg'></head>"), "/static/"),
+            (POST.replace("</head>", "<meta http-equiv='refresh' content='0..;url=/posts/first/hero.jpg'></head>"), "escapes /posts/second/"),
+            (POST.replace("</head>", "<meta property='article:tag' name='twitter:image' content='/static/image.jpg'></head>"), "/static/"),
+            (POST.replace("<body>", "<body background='/static/image.jpg'>"), "/static/"),
+            (POST.replace("</head>", "<link rel='preload' as='image' imagesrcset='/static/image.jpg 1x'></head>"), "/static/"),
+            (POST.replace("<p>", "<form action='/static/image.jpg'></form><p>"), "/static/"),
+            (POST.replace("<p>", "<a href='present.jpg' ping='/static/image.jpg'>p</a><p>"), "/static/"),
+            (POST.replace("</head>", "<base href='/styles/style.css'></head>").replace("<p>", "<img src='present.jpg'><p>"), "<base href>"),
+        ]
+        for html, message in cases:
+            self.write("posts/second/index.html", html)
+            for args in [("check",), ("build",), ("draft", "first"), ("publish", "first")]:
+                with self.subTest(html=html, args=args):
+                    self.assert_rejected_without_writes(*args, message=message)
+
+    def test_css_parser_and_unclosed_style_bypasses_fail_without_writes(self):
+        self.write("static/image.jpg", "legacy")
+        self.write("posts/first/hero.jpg", "first-hero")
+        self.write("posts/second/present.jpg", "ok")
+        cases = [
+            (POST.replace("</head>", "<style>.n::before{content:\"/*\"}body{background:url('/static/image.jpg')}/* */</style></head>"), "/static/"),
+            (POST.replace("<p>", "<div style=\"content:'/*';background:url('/posts/first/hero.jpg');/* */\"></div><p>"), "escapes /posts/second/"),
+            (POST.replace("</head>", "<style>.n::before{content:\"/*\"}@import '/static/legacy.css';/* */</style></head>"), "/static/"),
+            (POST.replace("</head>", "<style>body{background:\\75rl('/static/image.jpg')}</style></head>"), "/static/"),
+            (POST.replace("</head>", "<style>@\\69mport '/static/legacy.css';</style></head>"), "/static/"),
+            (POST.replace("</head>", "<style>body{background:url('https://j\\61 cobstephens.net/static/image.jpg')}</style></head>"), "/static/"),
+            (POST.replace("</head>", "<style>body{background-image:image-set('/static/image.jpg' 1x)}</style></head>"), "/static/"),
+            (POST.replace("</head>", "<style>body{background-image:-webkit-image-set('/posts/first/hero.jpg' 1x)}</style></head>"), "escapes /posts/second/"),
+            (POST.replace("</head>", "<style>body{color:rgb(0,0,0);\\\nbackground:url('/static/image.jpg')}</style></head>"), "/static/"),
+            (POST.replace("</head>", "<style>body{background:url(/styles/x\\31 /../../static/image.jpg)}</style></head>"), "traversal"),
+            (POST.replace("</head>", "<style>body{background:url(/styles/\\72 eset.css/../../static/image.jpg)}</style></head>"), "traversal"),
+            (POST.replace("</head>", "<style>body{background-image:image-set(url(\"present.jpg\" foo) 1x, \"/static/image.jpg\" 2x)}</style></head>"), "/static/"),
+            (POST.replace("</head>", "<style>body{background-image:image-set(url(present.jpg foo) 1x, \"/static/image.jpg\" 2x)}</style></head>"), "/static/"),
+            (POST.replace("</head>", "<style>body{background-image:image-set(url(\"present.jpg\" (foo)) 1x, \"/posts/first/hero.jpg\" 2x)}</style></head>"), "escapes /posts/second/"),
+            (POST.replace("</head>", "<style>body{background-image:image-set(src(\"present.jpg\" foo) 1x, \"/static/image.jpg\" 2x)}</style></head>"), "/static/"),
+            (POST.replace("</body></html>\n", "<style>body{background:url('/static/image.jpg')}"), "/static/"),
+        ]
+        for html, message in cases:
+            self.write("posts/second/index.html", html)
+            for args in [("check",), ("build",), ("draft", "first"), ("publish", "first")]:
+                with self.subTest(html=html, args=args):
+                    self.assert_rejected_without_writes(*args, message=message)
+
+    def test_html5_mode_foreign_content_cdata_and_noscript_bypasses_fail_without_writes(self):
+        self.write("static/image.jpg", "legacy")
+        self.write("posts/first/hero.jpg", "first-hero")
+        self.write("posts/second/present.jpg", "ok")
+        cases = [
+            (POST.replace("</head>", "<style/>body{background:url('/static/image.jpg')}</style></head>"), "/static/"),
+            (POST.replace("<p>", "<style/>body{background:url('/posts/first/hero.jpg')}</style><p>"), "escapes /posts/second/"),
+            (POST.replace("<p>", "<svg><style>body{background:&#x75;rl('/static/image.jpg')}</style></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<math><style>body{background:&#x75;rl('/static/image.jpg')}</style></math><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><style>/*&#x2a;/body{background:url('/posts/first/hero.jpg')}/*</style></svg><p>"), "escapes /posts/second/"),
+            (POST.replace("<p>", "<svg><style><img src='/static/image.jpg'></style></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<math><style><img src='/static/image.jpg'></style></math><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><title><img src='/static/image.jpg'></title></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><title><a href='/posts/first/hero.jpg'>x</a></title></svg><p>"), "escapes /posts/second/"),
+            (POST.replace("<p>", "<svg><title><style>body{background:url('/static/image.jpg')}</style></title></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><textarea><img src='/static/image.jpg'></textarea></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><xmp><img src='/static/image.jpg'></xmp></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><iframe><img src='/static/image.jpg'></iframe></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><noembed><img src='/static/image.jpg'></noembed></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><noframes><img src='/static/image.jpg'></noframes></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><script><img src='/static/image.jpg'></script></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><plaintext><img src='/static/image.jpg'></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<![CDATA[> <img src='/static/image.jpg'> ]]><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><title></svg><![CDATA[> <img src='/static/image.jpg'> ]]><p>"), "/static/"),
+            (POST.replace("<p>", "<noscript><style></noscript><img src='/static/image.jpg'></style><p>"), "/static/"),
+            (POST.replace("<p>", "<noscript><!--</noscript><img src='/posts/first/hero.jpg'>--><p>"), "escapes /posts/second/"),
+            (POST.replace("<p>", "<noscript><textarea></noscript><img src='/static/image.jpg'></textarea><p>"), "/static/"),
+        ]
+        for html, message in cases:
+            self.write("posts/second/index.html", html)
+            for args in [("check",), ("build",), ("draft", "first"), ("publish", "first")]:
+                with self.subTest(html=html, args=args):
+                    self.assert_rejected_without_writes(*args, message=message)
 
 
 if __name__ == "__main__":

@@ -9,9 +9,11 @@
 
 The manifest owns post order and status. The publisher owns archive list contents,
 post robots directives and draft password gates; all other HTML remains authored.
-Every reconciliation command reads and validates the managed tree, then computes
-the same desired-file plan. Application creates gates first and removes them last.
-An OS write failure may leave a partial application; rerun build after repair.
+Every reconciliation command reads and validates the managed tree—including
+post-local asset and link boundaries across all HTML files under each registered
+post directory—before computing the same desired-file plan. Application creates
+gates first and removes them last. An OS write failure may leave a partial
+application; rerun build after repair.
 """
 
 from dataclasses import dataclass, field
@@ -24,6 +26,7 @@ import re
 import secrets
 import stat
 import sys
+from urllib.parse import unquote, urlsplit
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -31,6 +34,47 @@ MANIFEST = ROOT / "posts.json"
 ARCHIVE = ROOT / "posts" / "index.html"
 ROBOTS = '<meta name="robots" content="noindex, nofollow">'
 IDENTIFIER = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+SAME_SITE_HOSTS = frozenset({"jacobstephens.net", "www.jacobstephens.net", "blog.stephens.page"})
+ALLOWED_SCHEMES = frozenset({"http", "https", "mailto", "tel", "sms", "data"})
+SITE_ROUTES = frozenset({
+    "/", "/index.html",
+    "/posts", "/posts/", "/posts/index.html",
+    "/about", "/about/", "/about/index.html",
+    "/projects", "/projects/", "/projects/index.html",
+    "/message", "/message/", "/message/index.html",
+    "/privacy-policy", "/privacy-policy/", "/privacy-policy/index.html",
+    "/categories", "/categories/", "/categories/index.html",
+})
+SHARED_CHROME_FILES = frozenset({"/favicon-32x32.png"})
+SHARED_CHROME_PREFIXES = ("/styles/", "/fonts/", "/icons/")
+URL_META_KEYS = frozenset({
+    "og:image", "og:image:url", "og:image:secure_url",
+    "twitter:image", "twitter:image:src", "twitter:image:url", "twitter:player",
+    "og:url", "twitter:url",
+    "og:audio", "og:audio:url", "og:audio:secure_url",
+    "og:video", "og:video:url", "og:video:secure_url",
+})
+PAGE_META_KEYS = frozenset({"og:url", "twitter:url"})
+CSS_ESCAPE_RE = re.compile(r"\\(?:([0-9a-fA-F]{1,6})(?:\r\n|[ \t\n\r\f])?|(\r\n|[\n\r\f])|(.))", re.DOTALL)
+CSS_WS = " \t\n\r\f"
+REFRESH_URL_PREFIX = re.compile(r"url\s*=\s*", re.IGNORECASE)
+ABRUPT_COMMENT_CLOSE = re.compile(r"-?>")
+COMMENT_CLOSE = re.compile(r"--!?>")
+HTML_RAWTEXT_TAGS = frozenset({"style", "script", "xmp", "iframe", "noembed", "noframes", "plaintext"})
+HTML_RCDATA_TAGS = frozenset({"textarea", "title"})
+SVG_HTML_INTEGRATION_TAGS = frozenset({"foreignobject", "desc", "title"})
+MATHML_TEXT_INTEGRATION_TAGS = frozenset({"mi", "mo", "mn", "ms", "mtext"})
+FOREIGN_BREAKOUT_TAGS = frozenset({
+    "b", "big", "blockquote", "body", "br", "center", "code", "dd", "div", "dl", "dt",
+    "em", "embed", "h1", "h2", "h3", "h4", "h5", "h6", "head", "hr", "i", "img", "li",
+    "listing", "menu", "meta", "nobr", "ol", "p", "pre", "ruby", "s", "small", "span",
+    "strong", "strike", "sub", "sup", "table", "tt", "u", "ul", "var",
+})
+MAX_SRCDOC_DEPTH = 16
+SPECIAL_SCHEME_PREFIX = re.compile(r"^(?:https?|ftp|ws|wss|file):", re.IGNORECASE)
+URL_STRIP_CHARS = "".join(chr(code) for code in range(0x21))
+URL_TAB_NL_REMOVE = str.maketrans("", "", "\t\n\r")
+FORBIDDEN_HOST_CHARS = frozenset("/\\?#@% ")
 
 # This public configuration contains only the location of the server's password
 # file. If the file is missing, Apache refuses access to the draft.
@@ -42,6 +86,9 @@ DRAFT_HTACCESS = (
     'AuthName "jacobstephens.net draft preview"\n'
     f"AuthUserFile {DRAFT_HTPASSWD}\n"
     "Require valid-user\n"
+    "<IfModule mod_headers.c>\n"
+    '    Header always set X-Robots-Tag "noindex, nofollow"\n'
+    "</IfModule>\n"
 )
 
 
@@ -333,15 +380,732 @@ def post_html(snapshot, draft):
     return document.replace(spans).encode("utf-8")
 
 
+def parse_srcset(value):
+    """Extract candidate URLs using the HTML5 srcset parsing algorithm."""
+    urls = []
+    pos = 0
+    length = len(value)
+    ascii_ws = " \t\n\f\r"
+    while pos < length:
+        while pos < length and (value[pos] in ascii_ws or value[pos] == ","):
+            pos += 1
+        if pos >= length:
+            break
+        start = pos
+        while pos < length and value[pos] not in ascii_ws:
+            pos += 1
+        url = value[start:pos]
+        if url.endswith(","):
+            url = url.rstrip(",")
+            if url:
+                urls.append(url)
+            continue
+        if url:
+            urls.append(url)
+        in_parens = False
+        while pos < length:
+            ch = value[pos]
+            pos += 1
+            if ch == "(":
+                in_parens = True
+            elif ch == ")":
+                in_parens = False
+            elif ch == "," and not in_parens:
+                break
+    return urls
+
+
+def parse_refresh_url(content):
+    """Extract a redirect target from an HTML5 meta refresh content value."""
+    text = content.strip(" \t\n\f\r")
+    if not text:
+        return None
+    index = 0
+    while index < len(text) and text[index].isdigit():
+        index += 1
+    if index == 0:
+        if text[0] not in (";", ","):
+            return None
+    elif index < len(text) and text[index] == ".":
+        index += 1
+        while index < len(text) and (text[index].isdigit() or text[index] == "."):
+            index += 1
+    if index >= len(text) or text[index] not in ";, \t\n\f\r":
+        return None
+    saw_separator = False
+    while index < len(text) and text[index] in " \t\n\f\r":
+        index += 1
+        saw_separator = True
+    if index < len(text) and text[index] in (";", ","):
+        index += 1
+        saw_separator = True
+        while index < len(text) and text[index] in " \t\n\f\r":
+            index += 1
+    if not saw_separator or index >= len(text):
+        return None
+    rest = text[index:]
+    match = REFRESH_URL_PREFIX.match(rest)
+    if match:
+        rest = rest[match.end():]
+    if not rest:
+        return None
+    if rest[0] in ("'", '"'):
+        end = rest.find(rest[0], 1)
+        return rest[1:end] if end != -1 else rest[1:]
+    return rest.rstrip(" \t\n\f\r")
+
+
+def decode_css_escapes(text):
+    """Decode CSS backslash escapes per CSS Syntax Level 3."""
+    def replace(match):
+        hex_digits, line_break, escaped = match.groups()
+        if hex_digits is not None:
+            code = int(hex_digits, 16)
+            if code == 0 or code > 0x10FFFF or 0xD800 <= code <= 0xDFFF:
+                return "\ufffd"
+            return chr(code)
+        if line_break is not None:
+            return ""
+        return escaped
+
+    return CSS_ESCAPE_RE.sub(replace, text)
+
+
+def _skip_css_ws_and_comments(css_text, pos):
+    length = len(css_text)
+    while pos < length:
+        if css_text[pos] in CSS_WS:
+            pos += 1
+        elif css_text.startswith("/*", pos):
+            end = css_text.find("*/", pos + 2)
+            pos = length if end == -1 else end + 2
+        else:
+            break
+    return pos
+
+
+def _advance_css_escape(css_text, pos, allow_newline=False):
+    """Return index after a CSS backslash escape, or None if not a valid escape."""
+    if pos + 1 >= len(css_text):
+        return pos + 1 if allow_newline else None
+    if not allow_newline and css_text[pos + 1] in "\n\r\f":
+        return None
+    match = CSS_ESCAPE_RE.match(css_text, pos)
+    return match.end() if match else pos + 1
+
+
+def _consume_css_string(css_text, pos):
+    quote = css_text[pos]
+    pos += 1
+    start = pos
+    length = len(css_text)
+    while pos < length:
+        ch = css_text[pos]
+        if ch == "\\":
+            pos = _advance_css_escape(css_text, pos, allow_newline=True)
+        elif ch == quote:
+            raw = css_text[start:pos]
+            return decode_css_escapes(raw), pos + 1
+        elif ch in "\n\r\f":
+            return None, pos
+        else:
+            pos += 1
+    return decode_css_escapes(css_text[start:pos]), pos
+
+
+def _consume_css_unquoted_url(css_text, pos):
+    start = pos
+    length = len(css_text)
+    while pos < length:
+        ch = css_text[pos]
+        if ch == "\\":
+            next_pos = _advance_css_escape(css_text, pos)
+            pos = next_pos if next_pos is not None else pos + 1
+        elif ch == ")":
+            return decode_css_escapes(css_text[start:pos]), pos + 1, True
+        elif ch in CSS_WS:
+            raw = css_text[start:pos]
+            pos = _skip_css_ws_and_comments(css_text, pos)
+            closed = pos < length and css_text[pos] == ")"
+            if closed:
+                pos += 1
+            return decode_css_escapes(raw), pos, closed
+        else:
+            pos += 1
+    return decode_css_escapes(css_text[start:pos]), pos, False
+
+
+def _consume_css_ident(css_text, pos):
+    start = pos
+    length = len(css_text)
+    while pos < length:
+        ch = css_text[pos]
+        if ch == "\\":
+            next_pos = _advance_css_escape(css_text, pos)
+            if next_pos is None:
+                break
+            pos = next_pos
+            continue
+        if ch.isalnum() or ch in "_-" or ord(ch) >= 0x80:
+            pos += 1
+        else:
+            break
+    return decode_css_escapes(css_text[start:pos]).lower(), pos
+
+
+def extract_css_urls(css_text):
+    """Yield URLs from CSS url()/src(), @import, and image-set() rules."""
+    pos = 0
+    length = len(css_text)
+    expect_import_url = False
+    paren_depth = 0
+    image_set_depths = []
+
+    while pos < length:
+        pos = _skip_css_ws_and_comments(css_text, pos)
+        if pos >= length:
+            break
+        ch = css_text[pos]
+        if ch in ("'", '"'):
+            val, pos = _consume_css_string(css_text, pos)
+            if val is not None and (expect_import_url or (image_set_depths and paren_depth == image_set_depths[-1])):
+                yield val
+            expect_import_url = False
+        elif ch == "@":
+            pos += 1
+            ident, pos = _consume_css_ident(css_text, pos)
+            expect_import_url = ident == "import"
+        elif ch == "(":
+            paren_depth += 1
+            pos += 1
+            expect_import_url = False
+        elif ch == ")":
+            if image_set_depths and paren_depth == image_set_depths[-1]:
+                image_set_depths.pop()
+            paren_depth = max(0, paren_depth - 1)
+            pos += 1
+            expect_import_url = False
+        elif ch in ";{}":
+            expect_import_url = False
+            pos += 1
+        elif ch.isalpha() or ch in "_-" or ord(ch) >= 0x80 or (
+            ch == "\\" and _advance_css_escape(css_text, pos) is not None
+        ):
+            ident, pos = _consume_css_ident(css_text, pos)
+            expect_import_url = False
+            if pos < length and css_text[pos] == "(":
+                if ident in ("url", "src"):
+                    paren_depth += 1
+                    pos = _skip_css_ws_and_comments(css_text, pos + 1)
+                    if pos < length and css_text[pos] in ("'", '"'):
+                        val, pos = _consume_css_string(css_text, pos)
+                        pos = _skip_css_ws_and_comments(css_text, pos)
+                        if pos < length and css_text[pos] == ")":
+                            paren_depth -= 1
+                            pos += 1
+                        if val is not None:
+                            yield val
+                    else:
+                        val, pos, closed = _consume_css_unquoted_url(css_text, pos)
+                        if closed:
+                            paren_depth -= 1
+                        yield val
+                elif ident in ("image-set", "-webkit-image-set"):
+                    paren_depth += 1
+                    image_set_depths.append(paren_depth)
+                    pos += 1
+        else:
+            pos += 1
+            expect_import_url = False
+
+
+@dataclass(frozen=True)
+class Reference:
+    url: str
+    is_page_link: bool
+    allow_local_dir: bool
+
+
+class _ReferenceHTMLParser(HTMLParser):
+    """HTML5-aligned tag, foreign-content, comment, and style extractor."""
+
+    def __init__(self, html, path=None, depth=0, scripting=False, seen_srcdocs=None):
+        super().__init__(convert_charrefs=True)
+        self.CDATA_CONTENT_ELEMENTS = ()
+        self.RCDATA_CONTENT_ELEMENTS = ()
+        self.references = []
+        self.saw_html_noscript = False
+        self._path = path
+        self._depth = depth
+        self._scripting = scripting
+        self._seen_srcdocs = seen_srcdocs
+        self._allow_cdata_mode = False
+        self._open_elements = []
+        self._in_style = False
+        self._style_chunks = []
+        self.feed(html)
+        self.close()
+        self._flush_style()
+
+    def set_cdata_mode(self, elem, *args, **kwargs):
+        if self._allow_cdata_mode:
+            super().set_cdata_mode(elem, *args, **kwargs)
+
+    def _enter_html_cdata_mode(self, tag):
+        self._allow_cdata_mode = True
+        try:
+            self.set_cdata_mode(tag)
+        finally:
+            self._allow_cdata_mode = False
+
+    def _in_foreign_content(self, start_tag=None):
+        if not self._open_elements:
+            return False
+        _, namespace, is_html_int, is_math_text_int = self._open_elements[-1]
+        if namespace == "html" or is_html_int:
+            return False
+        if is_math_text_int and start_tag is not None and start_tag not in ("mglyph", "malignmark"):
+            return False
+        return True
+
+    def _in_foreign_namespace(self):
+        return bool(self._open_elements and self._open_elements[-1][1] in ("svg", "math"))
+
+    def _breakout_foreign_content(self):
+        while self._open_elements:
+            el_tag, namespace, is_html_int, is_math_text_int = self._open_elements[-1]
+            if namespace == "html" or is_html_int or is_math_text_int:
+                break
+            if el_tag == "style":
+                self._flush_style()
+            self._open_elements.pop()
+
+    def parse_comment(self, i, report=True):
+        rawdata = self.rawdata
+        if rawdata.startswith("<!--", i):
+            abrupt = ABRUPT_COMMENT_CLOSE.match(rawdata, i + 4)
+            if abrupt:
+                if report:
+                    self.handle_comment("")
+                return abrupt.end()
+            close = COMMENT_CLOSE.search(rawdata, i + 4)
+            if not close:
+                return -1
+            if report:
+                self.handle_comment(rawdata[i + 4:close.start()])
+            return close.end()
+        return super().parse_comment(i, report=report)
+
+    def parse_html_declaration(self, i):
+        rawdata = self.rawdata
+        if rawdata.startswith("<![CDATA[", i):
+            if self._in_foreign_namespace():
+                end = rawdata.find("]]>", i + 9)
+                if end < 0:
+                    return -1
+                if self._in_style:
+                    self._style_chunks.append(rawdata[i + 9:end])
+                return end + 3
+            return self.parse_bogus_comment(i)
+        return super().parse_html_declaration(i)
+
+    def unknown_decl(self, data):
+        if self._in_style and self._in_foreign_namespace() and data.startswith("CDATA["):
+            self._style_chunks.append(data[6:])
+
+    def _add(self, url, is_page_link=False, allow_local_dir=False):
+        self.references.append(Reference(url, is_page_link, allow_local_dir))
+
+    def _add_css(self, css_text):
+        for url in extract_css_urls(css_text):
+            self._add(url)
+
+    def _flush_style(self):
+        if self._in_style:
+            self._add_css("".join(self._style_chunks))
+            self._in_style = False
+            self._style_chunks = []
+
+    def _extract_tag_urls(self, tag, first_attrs):
+        if tag == "base" and first_attrs.get("href") is not None:
+            raise InvalidSite(f"{self._path or 'html'}: <base href> is not allowed inside post HTML")
+        rel_tokens = (first_attrs.get("rel") or "").lower().split()
+        for name, value in first_attrs.items():
+            if value is None:
+                continue
+            if name in ("href", "xlink:href"):
+                page_link = tag in ("a", "area") or (tag == "link" and "canonical" in rel_tokens)
+                self._add(value, is_page_link=page_link, allow_local_dir=page_link)
+            elif name == "src":
+                self._add(value, allow_local_dir=(tag == "iframe"))
+            elif name in ("poster", "data", "background"):
+                self._add(value)
+            elif name in ("action", "formaction"):
+                self._add(value, is_page_link=True, allow_local_dir=True)
+            elif name == "ping":
+                for target in value.split():
+                    self._add(target)
+            elif name in ("srcset", "imagesrcset"):
+                for url in parse_srcset(value):
+                    self._add(url)
+            elif name == "style":
+                self._add_css(value)
+        if tag == "iframe":
+            srcdoc = first_attrs.get("srcdoc")
+            if srcdoc is not None:
+                if self._depth >= MAX_SRCDOC_DEPTH:
+                    raise InvalidSite(f"{self._path or 'html'}: nested iframe srcdoc exceeds maximum depth")
+                if self._seen_srcdocs is None or srcdoc not in self._seen_srcdocs:
+                    if self._seen_srcdocs is not None:
+                        self._seen_srcdocs.add(srcdoc)
+                    self.references.extend(
+                        ReferenceParser(srcdoc, self._path, self._depth + 1, self._seen_srcdocs).references
+                    )
+        elif tag == "meta":
+            self._handle_meta(first_attrs)
+
+    def _process_starttag(self, tag, attrs, self_closing):
+        # HTML5 keeps the first occurrence of duplicate attributes on an element.
+        first_attrs = {}
+        for name, value in attrs:
+            first_attrs.setdefault(name, value)
+
+        if self._in_foreign_content(tag):
+            is_breakout = (
+                tag in FOREIGN_BREAKOUT_TAGS
+                or (tag == "font" and any(key in first_attrs for key in ("color", "face", "size")))
+            )
+            if not is_breakout:
+                self._extract_tag_urls(tag, first_attrs)
+                if not self_closing:
+                    namespace = self._open_elements[-1][1]
+                    is_html_int = (
+                        (namespace == "svg" and tag in SVG_HTML_INTEGRATION_TAGS)
+                        or (
+                            namespace == "math"
+                            and tag == "annotation-xml"
+                            and (first_attrs.get("encoding") or "").strip().lower()
+                            in ("text/html", "application/xhtml+xml")
+                        )
+                    )
+                    is_math_text_int = namespace == "math" and tag in MATHML_TEXT_INTEGRATION_TAGS
+                    self._open_elements.append((tag, namespace, is_html_int, is_math_text_int))
+                    if tag == "style":
+                        self._flush_style()
+                        self._in_style = True
+                        self._style_chunks = []
+                return
+            self._breakout_foreign_content()
+
+        if tag in ("svg", "math"):
+            self._extract_tag_urls(tag, first_attrs)
+            if not self_closing:
+                self._open_elements.append((tag, tag, False, False))
+            return
+
+        self._extract_tag_urls(tag, first_attrs)
+        if tag == "noscript":
+            self.saw_html_noscript = True
+        if tag in HTML_RAWTEXT_TAGS or (self._scripting and tag == "noscript"):
+            if tag == "style":
+                self._in_style = True
+                self._style_chunks = []
+            self._enter_html_cdata_mode(tag)
+        elif tag in HTML_RCDATA_TAGS:
+            self._enter_html_cdata_mode(tag)
+        elif not self_closing and tag not in Document.VOID_TAGS:
+            self._open_elements.append((tag, "html", False, False))
+
+    def handle_starttag(self, tag, attrs):
+        self._process_starttag(tag, attrs, self_closing=False)
+
+    def handle_startendtag(self, tag, attrs):
+        self._process_starttag(tag, attrs, self_closing=True)
+
+    def _handle_meta(self, attr_map):
+        content = attr_map.get("content")
+        if content is None:
+            return
+        seen_keys = set()
+        for attr in ("property", "name"):
+            key = (attr_map.get(attr) or "").strip().lower()
+            if key in URL_META_KEYS and key not in seen_keys:
+                seen_keys.add(key)
+                page_link = key in PAGE_META_KEYS
+                self._add(content, is_page_link=page_link, allow_local_dir=page_link)
+        if (attr_map.get("http-equiv") or "").strip().lower() == "refresh":
+            target = parse_refresh_url(content)
+            if target is not None:
+                self._add(target, is_page_link=True, allow_local_dir=True)
+
+    def handle_endtag(self, tag):
+        if tag == "style" and not self._in_foreign_content():
+            self._flush_style()
+        in_foreign_el = bool(self._open_elements and self._open_elements[-1][1] != "html")
+        if self._in_foreign_content() and tag in ("br", "p"):
+            self._breakout_foreign_content()
+            return
+        for index in range(len(self._open_elements) - 1, -1, -1):
+            el_tag, namespace, _, _ = self._open_elements[index]
+            if el_tag == tag:
+                if any(item[0] == "style" and item[1] != "html" for item in self._open_elements[index:]):
+                    self._flush_style()
+                del self._open_elements[index:]
+                return
+            if in_foreign_el:
+                if namespace == "html":
+                    break
+            elif namespace != "html":
+                break
+
+    def handle_data(self, data):
+        if self._in_style:
+            self._style_chunks.append(data)
+
+
+class ReferenceParser:
+    """Extract asset and link references from a post HTML file."""
+
+    def __init__(self, html, path=None, depth=0, _seen_srcdocs=None):
+        seen_srcdocs = _seen_srcdocs if _seen_srcdocs is not None else set()
+        scanner = _ReferenceHTMLParser(
+            html, path=path, depth=depth, scripting=False, seen_srcdocs=seen_srcdocs,
+        )
+        references = list(scanner.references)
+        if scanner.saw_html_noscript:
+            scripted = _ReferenceHTMLParser(
+                html, path=path, depth=depth, scripting=True, seen_srcdocs=seen_srcdocs,
+            )
+            references.extend(scripted.references)
+        self.references = list(dict.fromkeys(references))
+
+
+def preprocess_url(html_path, raw_url):
+    """Trim C0/space edges, remove ASCII tab/newline, and reject remaining controls."""
+    url = raw_url.strip(URL_STRIP_CHARS).translate(URL_TAB_NL_REMOVE)
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in url):
+        raise InvalidSite(f"{html_path}: invalid control character in URL {raw_url!r}")
+    return url
+
+
+def canonicalize_host(html_path, raw_url, parsed):
+    """Percent-decode and IDNA-canonicalize a parsed host, stripping one trailing dot."""
+    raw_host = parsed.hostname
+    if not raw_host:
+        return ""
+    host = unquote(raw_host)
+    if (
+        any(ch in FORBIDDEN_HOST_CHARS or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in host)
+        or (":" in host and "[" not in parsed.netloc)
+    ):
+        raise InvalidSite(f"{html_path}: malformed URL {raw_url!r}")
+    if not host.isascii():
+        try:
+            host = host.encode("idna").decode("ascii")
+        except UnicodeError as error:
+            raise InvalidSite(f"{html_path}: malformed URL {raw_url!r}: {error}") from error
+    host = host.lower()
+    if host.endswith("."):
+        host = host[:-1]
+    if not host or host.endswith("."):
+        raise InvalidSite(f"{html_path}: malformed URL {raw_url!r}")
+    return host
+
+
+def normalize_authority_url(url):
+    """Normalize backslashes to slashes before '?'/'#' for special schemes and '//'."""
+    if not (url.startswith("//") or SPECIAL_SCHEME_PREFIX.match(url)):
+        return url
+    for index, ch in enumerate(url):
+        if ch in ("?", "#"):
+            return url[:index].replace("\\", "/") + url[index:]
+    return url.replace("\\", "/")
+
+
+def is_shared_chrome(parts, is_dir):
+    if is_dir:
+        return False
+    normalized = "/" + "/".join(parts)
+    if normalized in SHARED_CHROME_FILES:
+        return True
+    return len(parts) >= 2 and any(f"/{parts[0]}/" == prefix for prefix in SHARED_CHROME_PREFIXES)
+
+
+def post_html_files(post_dir):
+    """Collect regular HTML files under post_dir without skipping directory errors."""
+    if post_dir.is_symlink():
+        raise InvalidSite(f"{post_dir}: expected a real post directory, not a symlink")
+
+    def raise_walk_error(error):
+        raise InvalidSite(f"{error.filename or post_dir}: cannot inspect directory: {error}") from error
+
+    files = []
+    for dirpath, dirnames, filenames in os.walk(post_dir, followlinks=False, onerror=raise_walk_error):
+        current = Path(dirpath)
+        dirnames.sort()
+        for dirname in dirnames:
+            if (current / dirname).is_symlink():
+                raise InvalidSite(f"{current / dirname}: symlinked directory inside post is not allowed")
+        for filename in sorted(filenames):
+            if filename.lower().endswith((".html", ".htm")):
+                files.append(current / filename)
+    return files
+
+
+class PostBoundaryValidator:
+    """Validate all HTML asset and link references inside one registered post directory."""
+
+    def __init__(self, post_dir, registered_slugs):
+        self.post_dir = post_dir
+        self.resolved_post_dir = post_dir.resolve()
+        self.slug = post_dir.name
+        self.registered_slugs = registered_slugs
+
+    def validate(self, root_page):
+        root_path = self.post_dir / "index.html"
+        for html_path in post_html_files(self.post_dir):
+            snapshot = root_page if html_path == root_path else FileSnapshot.read(html_path)
+            for ref in ReferenceParser(snapshot.text(), html_path).references:
+                self.validate_reference(html_path, ref)
+
+    def _resolve_segments(self, html_path, raw_url, raw_path, initial_parts=(), allow_escape=False):
+        decoded = unquote(raw_path)
+        if "\\" in raw_path or "\\" in decoded or "\x00" in decoded:
+            raise InvalidSite(f"{html_path}: invalid character in path {raw_url!r}")
+        parts = list(initial_parts)
+        for segment in decoded.split("/"):
+            if segment in ("", "."):
+                continue
+            if segment == "..":
+                if not allow_escape or not parts:
+                    raise InvalidSite(f"{html_path}: path traversal outside /posts/{self.slug}/ in {raw_url!r}")
+                parts.pop()
+            else:
+                parts.append(segment)
+        is_dir = decoded.endswith("/") or decoded in (".", "..") or decoded.endswith(("/.", "/.."))
+        return parts, is_dir
+
+    def _verify_post_target(self, html_path, parts, is_dir, allow_local_dir, raw_url):
+        candidate = self.post_dir
+        for part in parts:
+            candidate = candidate / part
+            if candidate.is_symlink():
+                raise InvalidSite(f"{html_path}: symlink target {raw_url!r} escapes post boundary rules")
+        try:
+            resolved_candidate = candidate.resolve()
+        except OSError as error:
+            raise InvalidSite(f"{html_path}: invalid local target {raw_url!r}: {error}") from error
+        if not resolved_candidate.is_relative_to(self.resolved_post_dir):
+            raise InvalidSite(f"{html_path}: target {raw_url!r} escapes /posts/{self.slug}/")
+
+        try:
+            metadata = candidate.lstat()
+        except FileNotFoundError:
+            raise InvalidSite(f"{html_path}: missing post-local target {raw_url!r}")
+
+        if stat.S_ISDIR(metadata.st_mode):
+            if not allow_local_dir:
+                raise InvalidSite(f"{html_path}: asset reference {raw_url!r} points to a directory, not a file")
+            index_file = candidate / "index.html"
+            try:
+                index_meta = index_file.lstat()
+            except FileNotFoundError:
+                raise InvalidSite(f"{html_path}: missing directory index for {raw_url!r}")
+            if not stat.S_ISREG(index_meta.st_mode):
+                raise InvalidSite(f"{html_path}: directory index for {raw_url!r} must be a regular file")
+            return
+
+        if is_dir:
+            raise InvalidSite(f"{html_path}: directory reference {raw_url!r} does not resolve to a directory")
+        if not stat.S_ISREG(metadata.st_mode):
+            raise InvalidSite(f"{html_path}: post-local target {raw_url!r} must be a regular file")
+
+    def _validate_root_relative(self, html_path, raw_path, ref):
+        parts, is_dir = self._resolve_segments(html_path, ref.url, raw_path)
+        if parts and parts[0] == "static":
+            raise InvalidSite(f"{html_path}: disallowed /static/ reference {ref.url!r}")
+
+        if parts[:2] == ["posts", self.slug]:
+            self._verify_post_target(
+                html_path, parts[2:], is_dir=(is_dir or len(parts) == 2),
+                allow_local_dir=ref.allow_local_dir, raw_url=ref.url,
+            )
+            return
+
+        if is_shared_chrome(parts, is_dir):
+            return
+
+        normalized = "/" + "/".join(parts) + ("/" if is_dir and parts else "")
+        if normalized in SITE_ROUTES:
+            if not ref.is_page_link:
+                raise InvalidSite(f"{html_path}: asset reference {ref.url!r} cannot target site route")
+            return
+
+        if parts[:1] == ["posts"] and len(parts) >= 2:
+            is_registered_post_page = (
+                ref.is_page_link
+                and parts[1] in self.registered_slugs
+                and (len(parts) == 2 or (len(parts) == 3 and parts[2] == "index.html" and not is_dir))
+            )
+            if is_registered_post_page:
+                return
+        raise InvalidSite(f"{html_path}: reference {ref.url!r} escapes /posts/{self.slug}/")
+
+    def _validate_document_relative(self, html_path, raw_path, ref):
+        initial_parts = html_path.parent.relative_to(self.post_dir).parts
+        parts, is_dir = self._resolve_segments(
+            html_path, ref.url, raw_path, initial_parts=initial_parts, allow_escape=True,
+        )
+        self._verify_post_target(html_path, parts, is_dir, ref.allow_local_dir, ref.url)
+
+    def validate_reference(self, html_path, ref):
+        url = preprocess_url(html_path, ref.url)
+        if not url:
+            if not ref.is_page_link:
+                raise InvalidSite(f"{html_path}: empty asset reference")
+            return
+        if url.startswith("#"):
+            return
+        try:
+            parsed = urlsplit(normalize_authority_url(url))
+            host = canonicalize_host(html_path, url, parsed)
+        except ValueError as error:
+            raise InvalidSite(f"{html_path}: malformed URL {url!r}: {error}") from error
+
+        scheme = parsed.scheme.lower()
+        if scheme and scheme not in ALLOWED_SCHEMES:
+            raise InvalidSite(f"{html_path}: disallowed URL scheme in {url!r}")
+        if scheme and scheme not in ("http", "https"):
+            return
+
+        if parsed.netloc or scheme in ("http", "https"):
+            if not host:
+                raise InvalidSite(f"{html_path}: malformed URL {url!r}")
+            if host in SAME_SITE_HOSTS:
+                self._validate_root_relative(html_path, parsed.path or "/", ref)
+            elif not scheme and "." not in host:
+                raise InvalidSite(f"{html_path}: disallowed protocol-relative target {url!r}")
+            return
+
+        if not parsed.path:
+            return
+        if parsed.path.startswith("/"):
+            self._validate_root_relative(html_path, parsed.path, ref)
+        else:
+            self._validate_document_relative(html_path, parsed.path, ref)
+
+
 def desired_plan(data, manifest, status_changed):
     # All reads, validation and rendering finish before a caller can apply changes.
     archive = FileSnapshot.read(ARCHIVE)
     pages = [(archive, archive_html(archive, data))]
+    registered_slugs = {post["slug"] for post in data["posts"]}
     gates = []
     removals = []
     for post in data["posts"]:
         directory = ROOT / "posts" / post["slug"]
         page = FileSnapshot.read(directory / "index.html")
+        PostBoundaryValidator(directory, registered_slugs).validate(page)
         draft = post["status"] == "draft"
         pages.append((page, post_html(page, draft)))
         gate = FileSnapshot.read(directory / ".htaccess", optional=True)
