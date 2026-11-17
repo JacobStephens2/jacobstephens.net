@@ -19,10 +19,57 @@ Personal website of Jacob Stephens (https://jacobstephens.net). A lightweight, s
 ├── privacy-policy/         # Privacy policy
 ├── styles/                 # CSS
 │   ├── reset.css           # Meyer CSS reset
-│   └── style.css           # Site styles
+│   ├── style.css           # Site styles
+│   └── theme.js            # Theme preference, initialization and toggle
 ├── fonts/                  # Self-hosted web fonts (Merriweather, Playfair Display)
 ├── static/                 # Images and media
 └── .htaccess               # Apache rewrites and redirects
+```
+
+## Theme authoring
+
+Every HTML page using `/styles/style.css` includes the theme script exactly once,
+synchronously in the head after charset/viewport metadata and before stylesheets:
+
+```html
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="/styles/theme.js"></script>
+    <meta name="theme-color" content="#fef9ee">
+    <link rel="stylesheet" href="/styles/reset.css">
+    <link rel="stylesheet" href="/styles/style.css?v=23">
+</head>
+```
+
+Keep preference logic in `styles/theme.js`; do not add an inline initializer or
+`defer`, `async` or `type="module"` to the include. This applies to the archive,
+drafts and model-council pages as well as published posts. Historical pages using
+their own styles stay outside this contract.
+
+The script reads the existing `theme` storage key once. Stored `light` or `dark`
+pins override the system before styles apply; missing, invalid or inaccessible
+storage follows the system. The in-page preference owns subsequent clicks and
+events. Storage is best-effort: blocked or silently discarded writes cannot undo
+a choice on the current page, though that choice may not survive navigation.
+System changes apply in system mode; a storage event for `theme` accepts a new
+pin or returns to system mode on removal/invalid values. Once the document is
+ready, the script mounts the fixed accessible toggle and refreshes optional
+theme-color metadata, then enables transitions on the next animation frame.
+
+The synchronous classic script blocks rendering while its small asset loads on a
+cold visit. This accepted trade-off applies stored pins before styled rendering
+and keeps all preference policy in one place. If it fails to load, CSS still
+follows the system, without a scripted toggle; add no copied fallback.
+
+Theme tests require Node.js 18+ and Python 3.10+, using only their standard
+libraries. There is no package install or production build step:
+
+```sh
+node --test tests/test_theme.cjs
+python3 -m unittest discover -s tests -p test_theme.py -v
+python3 -m unittest discover -s tests -v
+python3 tools/publish.py check
 ```
 
 ## Adding a new post
