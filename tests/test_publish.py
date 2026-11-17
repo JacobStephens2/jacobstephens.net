@@ -33,6 +33,9 @@ AuthType Basic
 AuthName "jacobstephens.net draft preview"
 AuthUserFile /var/www/.htpasswd-drafts
 Require valid-user
+<IfModule mod_headers.c>
+    Header always set X-Robots-Tag "noindex, nofollow"
+</IfModule>
 """
 
 
@@ -367,6 +370,169 @@ class PublishCommands(unittest.TestCase):
         finally:
             self.root.chmod(0o755)
         self.assert_success("build")
+        self.assert_success("check")
+
+    def test_legacy_draft_gate_without_x_robots_tag_is_upgraded(self):
+        self.data["posts"][0]["status"] = "draft"
+        self.write_manifest()
+        self.assert_success("build")
+        legacy_gate = "\n".join(GATE.splitlines()[:6]) + "\n"
+        self.write("posts/first/.htaccess", legacy_gate)
+        self.assert_rejected_without_writes("check", message="STALE")
+        self.assert_success("build")
+        actual = (self.root / "posts/first/.htaccess").read_text()
+        self.assertEqual(actual, GATE)
+        self.assertIn("<IfModule mod_headers.c>", actual)
+        self.assertIn('Header always set X-Robots-Tag "noindex, nofollow"', actual)
+        self.assert_success("check")
+
+    def test_static_references_in_post_and_nested_html_fail_without_writes(self):
+        self.write("static/image.jpg", "legacy")
+        cases = [
+            ("posts/second/index.html", POST.replace("<p>", "<img src='/static/image.jpg'><p>")),
+            ("posts/second/index.html", POST.replace("<p>", "<a href='/static/image.jpg'>old</a><p>")),
+            ("posts/second/index.html", POST.replace("</head>", '<meta property="og:image" content="https://jacobstephens.net/static/image.jpg"></head>')),
+            ("posts/second/index.html", POST.replace("</head>", '<meta name="twitter:image" content="https://blog.stephens.page/static/image.jpg"></head>')),
+            ("posts/second/index.html", POST.replace("<p>", '<img srcset="https://www.jacobstephens.net/static/image.jpg 1x"><p>')),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='//jacobstephens.net/static/image.jpg'><p>")),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='/%73tatic/image.jpg'><p>")),
+            ("posts/second/model-council/index.html", POST.replace("<p>", "<img src='/static/image.jpg'><p>")),
+        ]
+        for rel_path, html in cases:
+            self.write("posts/second/index.html", POST)
+            nested = self.root / "posts/second/model-council/index.html"
+            if nested.exists():
+                nested.unlink()
+            self.write(rel_path, html)
+            for args in [("check",), ("build",), ("draft", "first"), ("publish", "first")]:
+                with self.subTest(rel_path=rel_path, html=html, args=args):
+                    self.assert_rejected_without_writes(*args, message="/static/")
+
+    def test_path_traversal_and_missing_post_local_targets_fail_without_writes(self):
+        self.write("posts/first/secret.jpg", "first-secret")
+        self.write("posts/second/present.jpg", "ok")
+        self.write("posts/second/nested/page.html", POST)
+        self.write("posts/second/empty-dir/note.txt", "no index")
+        cases = [
+            ("posts/second/index.html", POST.replace("<p>", "<img src='../first/secret.jpg'><p>"), "traversal"),
+            ("posts/second/index.html", POST.replace("<p>", "<link rel='stylesheet' href='../../styles/style.css'><p>"), "traversal"),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='nested/../../first/secret.jpg'><p>"), "traversal"),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='/posts/second/../first/secret.jpg'><p>"), "traversal"),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='%2e%2e/first/secret.jpg'><p>"), "traversal"),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='..\\first\\secret.jpg'><p>"), "invalid character"),
+            ("posts/second/nested/page.html", POST.replace("<p>", "<img src='../../first/secret.jpg'><p>"), "traversal"),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='missing.jpg'><p>"), "missing post-local"),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='/posts/second/missing.jpg'><p>"), "missing post-local"),
+            ("posts/second/index.html", POST.replace("</head>", '<meta property="og:image" content="https://jacobstephens.net/posts/second/missing.jpg"></head>'), "missing post-local"),
+            ("posts/second/index.html", POST.replace("<p>", "<img srcset='present.jpg 1x, missing.jpg 2x'><p>"), "missing post-local"),
+            ("posts/second/index.html", POST.replace("<p>", "<a href='missing-dir/'>missing</a><p>"), "missing post-local"),
+            ("posts/second/index.html", POST.replace("<p>", "<a href='empty-dir/'>no index</a><p>"), "missing directory index"),
+            ("posts/second/index.html", POST.replace("<p>", "<img src='nested/'><p>"), "directory, not a file"),
+            ("posts/second/index.html", POST.replace("<p>", "<a href='present.jpg/'>bad slash</a><p>"), "does not resolve to a directory"),
+        ]
+        for rel_path, html, message in cases:
+            self.write("posts/second/index.html", POST)
+            self.write("posts/second/nested/page.html", POST)
+            self.write(rel_path, html)
+            for args in [("check",), ("build",), ("draft", "first"), ("publish", "first")]:
+                with self.subTest(rel_path=rel_path, message=message, args=args):
+                    self.assert_rejected_without_writes(*args, message=message)
+
+        self.write("posts/second/index.html", POST.replace("<p>", "<img src='leak.jpg'><p>"))
+        symlink = self.root / "posts/second/leak.jpg"
+        symlink.symlink_to("../first/secret.jpg")
+        for args in [("check",), ("build",), ("draft", "first"), ("publish", "first")]:
+            with self.subTest(symlink=True, args=args):
+                self.assert_rejected_without_writes(*args, message="symlink")
+
+    def test_cross_post_non_page_assets_and_escaping_links_fail_without_writes(self):
+        self.write("posts/first/hero.jpg", "first-hero")
+        self.write("posts/first/notes.pdf", "pdf")
+        self.write("posts/first/model-council/index.html", POST)
+        self.write("posts/unregistered/index.html", POST)
+        self.write("about/jacob_laughing.jpeg", "about-img")
+        cases = [
+            POST.replace("<p>", "<img src='/posts/first/hero.jpg'><p>"),
+            POST.replace("<p>", "<a href='/posts/first/hero.jpg'>hero</a><p>"),
+            POST.replace("<p>", "<a href='https://jacobstephens.net/posts/first/notes.pdf'>pdf</a><p>"),
+            POST.replace("</head>", '<meta property="og:image" content="https://jacobstephens.net/posts/first/hero.jpg"></head>'),
+            POST.replace("<p>", "<img src='/posts/first/'><p>"),
+            POST.replace("<p>", "<script src='/posts/first/'></script><p>"),
+            POST.replace("<p>", "<a href='/posts/first/model-council/'>sub</a><p>"),
+            POST.replace("<p>", "<a href='/posts/unregistered/'>unregistered</a><p>"),
+            POST.replace("<p>", "<img src='/about/jacob_laughing.jpeg'><p>"),
+            POST.replace("<p>", "<a href='/about/jacob_laughing.jpeg'>pic</a><p>"),
+            POST.replace("<p>", "<a href='/posts.json'>manifest</a><p>"),
+            POST.replace("<head>", "<head><style>body{background:url('/posts/first/hero.jpg')}</style>"),
+        ]
+        for html in cases:
+            self.write("posts/second/index.html", html)
+            for args in [("check",), ("build",), ("draft", "first"), ("publish", "first")]:
+                with self.subTest(html=html, args=args):
+                    self.assert_rejected_without_writes(*args, message="escapes /posts/second/")
+
+    def test_valid_post_local_assets_nested_pages_chrome_and_post_links_succeed(self):
+        self.write("posts/first/hero.jpg", "img")
+        self.write("posts/first/spaced file.pdf", "pdf")
+        self.write("posts/first/model-council/research.md", "# notes\n")
+        self.write("posts/first/model-council/index.html", (
+            "<!doctype html><html><head>"
+            "<script src='/styles/theme.js'></script>"
+            "<link rel='stylesheet' href='/styles/style.css?v=23'>"
+            "<title>Council</title></head><body>"
+            "<a href='/posts/first/'>Back</a>"
+            "<a href='sources/'>Sources</a>"
+            "<a href='sources/#fn-1'>Note</a>"
+            "<a href='research.md'>Raw</a>"
+            "</body></html>\n"
+        ))
+        self.write("posts/first/model-council/sources/index.html", (
+            "<!doctype html><html><head><title>Sources</title></head><body>"
+            "<a href='../'>Council</a>"
+            "<a href='../../'>Post</a>"
+            "<a href='../research.md'>Raw</a>"
+            "<a href='/posts/second/'>Other post</a>"
+            "</body></html>\n"
+        ))
+        rich_post = (
+            "<!doctype html><html><head>"
+            "<meta charset='UTF-8'>"
+            "<meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+            "<script src='/styles/theme.js'></script>"
+            "<meta property='og:image' content='https://jacobstephens.net/posts/first/hero.jpg'>"
+            "<meta name='twitter:image' content='https://jacobstephens.net/posts/first/hero.jpg'>"
+            "<link rel='icon' href='/favicon-32x32.png'>"
+            "<link rel='stylesheet' href='/styles/reset.css'>"
+            "<link rel='stylesheet' href='/styles/style.css?v=23'>"
+            "<script defer src='https://analytics.stephens.page/script.js'></script>"
+            "<title>Rich post</title></head><body>"
+            "<!-- <img src='/static/legacy.jpg'> -->"
+            "<a href='https://jacobstephens.net'>Home</a>"
+            "<a href='/'>Root</a>"
+            "<a href='/posts/'>All posts</a>"
+            "<a href='/posts/#general'>Category</a>"
+            "<a href='/about/'>About</a>"
+            "<a href='/privacy-policy'>Privacy</a>"
+            "<a href='/posts/second/'>Next post</a>"
+            "<a href='/posts/second/#part'>Next anchor</a>"
+            "<a href='https://jacobstephens.net/posts/second/'>Same-site post</a>"
+            "<a href='model-council/'>Council</a>"
+            "<a href='model-council/sources/'>Sources</a>"
+            "<a href='model-council/research.md'>Markdown</a>"
+            "<img src='hero.jpg?v=1' srcset='/posts/first/hero.jpg 1x'>"
+            "<a href='spaced%20file.pdf'>PDF</a>"
+            "<a href='#local'>Anchor</a>"
+            "<a href='mailto:jacob@stephens.page'>Email</a>"
+            "<a href='https://example.com/static/external.png'>External</a>"
+            "</body></html>\n"
+        )
+        self.write("posts/first/index.html", rich_post)
+        self.assert_success("build")
+        self.assert_success("check")
+        self.assert_success("draft", "first")
+        self.assertEqual((self.root / "posts/first/.htaccess").read_text(), GATE)
+        self.assert_success("check")
+        self.assert_success("publish", "first")
         self.assert_success("check")
 
 

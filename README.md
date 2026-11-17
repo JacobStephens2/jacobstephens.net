@@ -6,7 +6,7 @@ Personal website of Jacob Stephens (https://jacobstephens.net). A lightweight, s
 
 ```
 ├── index.html              # Homepage
-├── posts/                  # Blog posts (clean HTML)
+├── posts/                  # Blog posts and colocated post-local assets
 │   ├── index.html          # Posts listing
 │   ├── bending-fire/
 │   ├── on-sexuality-and-criminality/
@@ -22,7 +22,7 @@ Personal website of Jacob Stephens (https://jacobstephens.net). A lightweight, s
 │   ├── style.css           # Site styles
 │   └── theme.js            # Theme preference, initialization and toggle
 ├── fonts/                  # Self-hosted web fonts (Merriweather, Playfair Display)
-├── static/                 # Images and media
+├── static/                 # Legacy unmigrated media (registered posts use posts/<slug>/)
 └── .htaccess               # Apache rewrites and redirects
 ```
 
@@ -78,15 +78,32 @@ python3 tools/publish.py check
    Use a unique lowercase hyphenated slug and exactly one complete `<head>`.
    Include at most one robots meta tag, directly inside the head; the publisher
    handles its contents and can insert it without a theme-color anchor.
+   Colocate all post-specific images, PDFs, scripts, data files, and nested pages
+   (such as `model-council/` and `model-council/sources/`) inside
+   `posts/my-new-post/` rather than `/static/`, so draft gates protect every
+   post asset alongside the post HTML. Reference post-local targets using
+   relative paths inside `posts/my-new-post/`, root-relative
+   `/posts/my-new-post/...` paths, or same-site
+   `https://jacobstephens.net/posts/my-new-post/...` URLs (for example in
+   `og:image` / `twitter:image`). Relative `..` segments may navigate within
+   `posts/my-new-post/` (such as `../` from a nested page) but may not traverse
+   outside the post directory. Shared site chrome (`/styles/...`, `/fonts/...`,
+   `/icons/...`, `/favicon-32x32.png`), site routes (`/`, `/posts/`, `/about/`,
+   `/projects/`, `/message/`, `/privacy-policy`), external URLs, and page links
+   to registered `/posts/<other-slug>/` pages are allowed; `/static/` links,
+   missing post-local targets, cross-post non-page assets, and path traversal
+   outside `posts/my-new-post/` fail validation.
 2. Register the post in `posts.json` with `slug`, nonempty `title` and `date`
    strings, a `categories` list of unique declared category ids, and `status`
    set to `draft`. An empty category list is valid. The array order controls
    listing order; display dates are preserved as text.
 3. Run `python3 tools/publish.py build`, then `python3 tools/publish.py check`.
    Commit the manifest, post and generated changes together. Drafts are omitted
-   from listings, carry `noindex, nofollow`, and require the existing shared
-   preview password via a generated `.htaccess`. Its credential file remains
-   `/var/www/.htpasswd-drafts` on the server; never commit credentials.
+   from listings, carry `noindex, nofollow`, and get a generated `.htaccess`
+   requiring the shared preview password via HTTP Basic Auth plus
+   `<IfModule mod_headers.c>` `Header always set X-Robots-Tag "noindex, nofollow"`.
+   Its credential file remains `/var/www/.htpasswd-drafts` on the server; never
+   commit credentials.
 4. To publish, run `python3 tools/publish.py publish my-new-post`, then `check`
    again and commit the changes. To return a post to draft, run
    `python3 tools/publish.py draft my-new-post` and check/commit again.
@@ -116,8 +133,10 @@ may vary. The publisher replaces only list interiors and managed robots tags;
 headings, navigation, prose and styling stay authored. Undeclared post directories
 are outside the publisher's scope.
 
-All reconciliation commands validate every registered post, archive target and
-existing gate before writing anything. `check` is read-only and fails on invalid
+All reconciliation commands validate every registered post—including all HTML
+files and post-local asset and link boundaries under each registered post
+directory—alongside archive targets and existing gates before writing anything.
+`check` is read-only and fails on invalid
 input or stale output. `build` repairs drift; repeating it leaves files untouched.
 Status changes reconcile the whole site in the same plan, creating draft gates
 first, updating HTML and the manifest next, and removing published gates last.

@@ -9,9 +9,11 @@
 
 The manifest owns post order and status. The publisher owns archive list contents,
 post robots directives and draft password gates; all other HTML remains authored.
-Every reconciliation command reads and validates the managed tree, then computes
-the same desired-file plan. Application creates gates first and removes them last.
-An OS write failure may leave a partial application; rerun build after repair.
+Every reconciliation command reads and validates the managed tree—including
+post-local asset and link boundaries across all HTML files under each registered
+post directory—before computing the same desired-file plan. Application creates
+gates first and removes them last. An OS write failure may leave a partial
+application; rerun build after repair.
 """
 
 from dataclasses import dataclass, field
@@ -24,6 +26,7 @@ import re
 import secrets
 import stat
 import sys
+from urllib.parse import unquote, urlsplit
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -31,6 +34,30 @@ MANIFEST = ROOT / "posts.json"
 ARCHIVE = ROOT / "posts" / "index.html"
 ROBOTS = '<meta name="robots" content="noindex, nofollow">'
 IDENTIFIER = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+SAME_SITE_HOSTS = frozenset({"jacobstephens.net", "www.jacobstephens.net", "blog.stephens.page"})
+ALLOWED_SCHEMES = frozenset({"http", "https", "mailto", "tel", "sms", "data"})
+SITE_ROUTES = frozenset({
+    "/", "/index.html",
+    "/posts", "/posts/", "/posts/index.html",
+    "/about", "/about/", "/about/index.html",
+    "/projects", "/projects/", "/projects/index.html",
+    "/message", "/message/", "/message/index.html",
+    "/privacy-policy", "/privacy-policy/", "/privacy-policy/index.html",
+    "/categories", "/categories/", "/categories/index.html",
+})
+SHARED_CHROME_FILES = frozenset({"/favicon-32x32.png"})
+SHARED_CHROME_PREFIXES = ("/styles/", "/fonts/", "/icons/")
+URL_META_KEYS = frozenset({
+    "og:image", "og:image:url", "og:image:secure_url",
+    "twitter:image", "twitter:image:src",
+    "og:url", "twitter:url",
+    "og:audio", "og:audio:url",
+    "og:video", "og:video:url",
+})
+PAGE_META_KEYS = frozenset({"og:url", "twitter:url"})
+CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+CSS_URL_RE = re.compile(r"""url\(\s*(?:'([^']*)'|"([^"]*)"|([^)"'\s]+))\s*\)""", re.IGNORECASE)
+REFRESH_URL_RE = re.compile(r";\s*url\s*=\s*(.+)$", re.IGNORECASE)
 
 # This public configuration contains only the location of the server's password
 # file. If the file is missing, Apache refuses access to the draft.
@@ -42,6 +69,9 @@ DRAFT_HTACCESS = (
     'AuthName "jacobstephens.net draft preview"\n'
     f"AuthUserFile {DRAFT_HTPASSWD}\n"
     "Require valid-user\n"
+    "<IfModule mod_headers.c>\n"
+    '    Header always set X-Robots-Tag "noindex, nofollow"\n'
+    "</IfModule>\n"
 )
 
 
@@ -333,15 +363,302 @@ def post_html(snapshot, draft):
     return document.replace(spans).encode("utf-8")
 
 
+def parse_srcset(value):
+    """Extract candidate URLs from an HTML srcset attribute."""
+    urls = []
+    parts = value.split(",")
+    index = 0
+    while index < len(parts):
+        candidate = parts[index].strip()
+        if candidate.startswith("data:") and index + 1 < len(parts) and not any(ch.isspace() for ch in candidate):
+            candidate = candidate + "," + parts[index + 1].strip()
+            index += 1
+        index += 1
+        if candidate:
+            urls.append(candidate.split()[0])
+    return urls
+
+
+def extract_css_urls(css_text):
+    """Yield URLs referenced inside CSS url(...) expressions, ignoring comments."""
+    cleaned = CSS_COMMENT_RE.sub("", css_text)
+    for match in CSS_URL_RE.finditer(cleaned):
+        yield next(group for group in match.groups() if group is not None)
+
+
+@dataclass(frozen=True)
+class Reference:
+    url: str
+    is_page_link: bool
+    allow_local_dir: bool
+
+
+class ReferenceParser(HTMLParser):
+    """Extract asset and link references from a post HTML file."""
+
+    def __init__(self, html):
+        super().__init__(convert_charrefs=True)
+        self.references = []
+        self._in_style = False
+        self._style_chunks = []
+        self.feed(html)
+        self.close()
+
+    def _add(self, url, is_page_link=False, allow_local_dir=False):
+        self.references.append(Reference(url, is_page_link, allow_local_dir))
+
+    def _add_css(self, css_text):
+        for url in extract_css_urls(css_text):
+            self._add(url)
+
+    def handle_starttag(self, tag, attrs):
+        attr_map = dict(attrs)
+        rel_tokens = (attr_map.get("rel") or "").lower().split()
+        for name, value in attrs:
+            if value is None:
+                continue
+            if name in ("href", "xlink:href"):
+                page_link = tag in ("a", "area") or (tag == "link" and "canonical" in rel_tokens)
+                self._add(value, is_page_link=page_link, allow_local_dir=page_link)
+            elif name == "src":
+                self._add(value, allow_local_dir=(tag == "iframe"))
+            elif name in ("poster", "data"):
+                self._add(value)
+            elif name == "srcset":
+                for url in parse_srcset(value):
+                    self._add(url)
+            elif name == "style":
+                self._add_css(value)
+        if tag == "meta":
+            self._handle_meta(attr_map)
+        elif tag == "style":
+            self._in_style = True
+            self._style_chunks = []
+
+    def _handle_meta(self, attr_map):
+        content = attr_map.get("content")
+        if content is None:
+            return
+        key = (attr_map.get("property") or attr_map.get("name") or "").strip().lower()
+        if key in URL_META_KEYS:
+            page_link = key in PAGE_META_KEYS
+            self._add(content, is_page_link=page_link, allow_local_dir=page_link)
+        elif (attr_map.get("http-equiv") or "").strip().lower() == "refresh":
+            match = REFRESH_URL_RE.search(content.strip())
+            if match:
+                target = match.group(1).strip().strip("'\"")
+                self._add(target, is_page_link=True, allow_local_dir=True)
+
+    def handle_endtag(self, tag):
+        if tag == "style" and self._in_style:
+            self._add_css("".join(self._style_chunks))
+            self._in_style = False
+            self._style_chunks = []
+
+    def handle_data(self, data):
+        if self._in_style:
+            self._style_chunks.append(data)
+
+
+def decode_local_path(html_path, raw_url, path):
+    """Percent-decode a local URL path and reject backslashes or null bytes."""
+    decoded = unquote(path)
+    if "\\" in path or "\\" in decoded or "\x00" in decoded:
+        raise InvalidSite(f"{html_path}: invalid character in path {raw_url!r}")
+    return decoded
+
+
+def normalize_root_path(html_path, raw_url, path):
+    """Decode and normalize a root-relative path, rejecting traversal."""
+    decoded = decode_local_path(html_path, raw_url, path)
+    segments = []
+    for segment in decoded.split("/"):
+        if segment in ("", "."):
+            continue
+        if segment == "..":
+            raise InvalidSite(f"{html_path}: path traversal outside post directory in {raw_url!r}")
+        segments.append(segment)
+    trailing_slash = decoded.endswith("/") and bool(segments)
+    return "/" + "/".join(segments) + ("/" if trailing_slash else "")
+
+
+def verify_post_target(html_path, post_dir, parts, is_dir, allow_local_dir, raw_url):
+    """Verify a target exists inside post_dir without escaping via symlinks."""
+    resolved_post_dir = post_dir.resolve()
+    candidate = post_dir
+    for part in parts:
+        candidate = candidate / part
+        if candidate.is_symlink():
+            raise InvalidSite(f"{html_path}: symlink target {raw_url!r} escapes post boundary rules")
+    try:
+        resolved_candidate = candidate.resolve()
+    except OSError as error:
+        raise InvalidSite(f"{html_path}: invalid local target {raw_url!r}: {error}") from error
+    if not resolved_candidate.is_relative_to(resolved_post_dir):
+        raise InvalidSite(f"{html_path}: target {raw_url!r} escapes /posts/{post_dir.name}/")
+
+    try:
+        metadata = candidate.lstat()
+    except FileNotFoundError:
+        raise InvalidSite(f"{html_path}: missing post-local target {raw_url!r}")
+
+    if stat.S_ISDIR(metadata.st_mode):
+        if not allow_local_dir:
+            raise InvalidSite(f"{html_path}: asset reference {raw_url!r} points to a directory, not a file")
+        index_file = candidate / "index.html"
+        try:
+            index_meta = index_file.lstat()
+        except FileNotFoundError:
+            raise InvalidSite(f"{html_path}: missing directory index for {raw_url!r}")
+        if not stat.S_ISREG(index_meta.st_mode):
+            raise InvalidSite(f"{html_path}: directory index for {raw_url!r} must be a regular file")
+        return
+
+    if is_dir:
+        raise InvalidSite(f"{html_path}: directory reference {raw_url!r} does not resolve to a directory")
+    if not stat.S_ISREG(metadata.st_mode):
+        raise InvalidSite(f"{html_path}: post-local target {raw_url!r} must be a regular file")
+
+
+def is_shared_chrome(path):
+    return path in SHARED_CHROME_FILES or any(
+        path.startswith(prefix) and len(path) > len(prefix) and not path.endswith("/")
+        for prefix in SHARED_CHROME_PREFIXES
+    )
+
+
+def validate_root_relative(html_path, post_dir, slug, registered_slugs, raw_path, ref):
+    """Validate a root-relative or same-site path against post boundaries and allowlists."""
+    normalized = normalize_root_path(html_path, ref.url, raw_path)
+    if normalized == "/static" or normalized.startswith("/static/"):
+        raise InvalidSite(f"{html_path}: disallowed /static/ reference {ref.url!r}")
+
+    post_prefix = f"/posts/{slug}"
+    if normalized == post_prefix or normalized == f"{post_prefix}/":
+        verify_post_target(html_path, post_dir, (), is_dir=True, allow_local_dir=ref.allow_local_dir, raw_url=ref.url)
+        return
+    if normalized.startswith(f"{post_prefix}/"):
+        rel = normalized[len(f"{post_prefix}/"):]
+        parts = [part for part in rel.split("/") if part]
+        verify_post_target(
+            html_path, post_dir, parts, is_dir=rel.endswith("/"),
+            allow_local_dir=ref.allow_local_dir, raw_url=ref.url,
+        )
+        return
+
+    if is_shared_chrome(normalized):
+        return
+    if normalized in SITE_ROUTES:
+        if not ref.is_page_link:
+            raise InvalidSite(f"{html_path}: asset reference {ref.url!r} cannot target site route")
+        return
+
+    if normalized.startswith("/posts/"):
+        sub_parts = [part for part in normalized[len("/posts/"):].split("/") if part]
+        is_registered_post_page = (
+            ref.is_page_link
+            and bool(sub_parts)
+            and sub_parts[0] in registered_slugs
+            and (len(sub_parts) == 1 or (len(sub_parts) == 2 and sub_parts[1] == "index.html" and not normalized.endswith("/")))
+        )
+        if is_registered_post_page:
+            return
+    raise InvalidSite(f"{html_path}: reference {ref.url!r} escapes /posts/{slug}/")
+
+
+def validate_document_relative(html_path, post_dir, slug, raw_path, ref):
+    """Resolve and verify a document-relative path stays inside post_dir."""
+    decoded = decode_local_path(html_path, ref.url, raw_path)
+    parts = list(html_path.parent.relative_to(post_dir).parts)
+    for segment in decoded.split("/"):
+        if segment in ("", "."):
+            continue
+        if segment == "..":
+            if not parts:
+                raise InvalidSite(f"{html_path}: path traversal outside /posts/{slug}/ in {ref.url!r}")
+            parts.pop()
+        else:
+            parts.append(segment)
+    is_dir = decoded.endswith("/") or decoded in (".", "..") or decoded.endswith(("/.", "/.."))
+    verify_post_target(html_path, post_dir, parts, is_dir=is_dir, allow_local_dir=ref.allow_local_dir, raw_url=ref.url)
+
+
+def validate_reference(html_path, post_dir, slug, registered_slugs, ref):
+    """Validate one extracted URL reference from a post HTML file."""
+    url = ref.url.strip()
+    if not url:
+        if not ref.is_page_link:
+            raise InvalidSite(f"{html_path}: empty asset reference")
+        return
+    if url.startswith("#"):
+        return
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower()
+    except ValueError as error:
+        raise InvalidSite(f"{html_path}: malformed URL {url!r}: {error}") from error
+
+    scheme = parsed.scheme.lower()
+    if scheme and scheme not in ALLOWED_SCHEMES:
+        raise InvalidSite(f"{html_path}: disallowed URL scheme in {url!r}")
+    if scheme and scheme not in ("http", "https"):
+        return
+
+    if parsed.netloc or scheme in ("http", "https"):
+        if not host:
+            raise InvalidSite(f"{html_path}: malformed URL {url!r}")
+        if host in SAME_SITE_HOSTS:
+            validate_root_relative(html_path, post_dir, slug, registered_slugs, parsed.path or "/", ref)
+        elif not scheme and "." not in host:
+            raise InvalidSite(f"{html_path}: disallowed protocol-relative target {url!r}")
+        return
+
+    if not parsed.path:
+        return
+    if parsed.path.startswith("/"):
+        validate_root_relative(html_path, post_dir, slug, registered_slugs, parsed.path, ref)
+    else:
+        validate_document_relative(html_path, post_dir, slug, parsed.path, ref)
+
+
+def post_html_files(post_dir):
+    """Collect regular HTML files under post_dir without following symlinked directories."""
+    if post_dir.is_symlink():
+        raise InvalidSite(f"{post_dir}: expected a real post directory, not a symlink")
+    files = []
+    for dirpath, dirnames, filenames in os.walk(post_dir, followlinks=False):
+        current = Path(dirpath)
+        dirnames.sort()
+        for dirname in dirnames:
+            if (current / dirname).is_symlink():
+                raise InvalidSite(f"{current / dirname}: symlinked directory inside post is not allowed")
+        for filename in sorted(filenames):
+            if filename.lower().endswith((".html", ".htm")):
+                files.append(current / filename)
+    return files
+
+
+def validate_post_directory(post_dir, slug, registered_slugs, root_page):
+    """Inspect all HTML files under post_dir for asset and link boundary violations."""
+    root_path = post_dir / "index.html"
+    for html_path in post_html_files(post_dir):
+        snapshot = root_page if html_path == root_path else FileSnapshot.read(html_path)
+        parser = ReferenceParser(snapshot.text())
+        for ref in parser.references:
+            validate_reference(html_path, post_dir, slug, registered_slugs, ref)
+
+
 def desired_plan(data, manifest, status_changed):
     # All reads, validation and rendering finish before a caller can apply changes.
     archive = FileSnapshot.read(ARCHIVE)
     pages = [(archive, archive_html(archive, data))]
+    registered_slugs = {post["slug"] for post in data["posts"]}
     gates = []
     removals = []
     for post in data["posts"]:
         directory = ROOT / "posts" / post["slug"]
         page = FileSnapshot.read(directory / "index.html")
+        validate_post_directory(directory, post["slug"], registered_slugs, page)
         draft = post["status"] == "draft"
         pages.append((page, post_html(page, draft)))
         gate = FileSnapshot.read(directory / ".htaccess", optional=True)
