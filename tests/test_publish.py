@@ -545,6 +545,9 @@ class PublishCommands(unittest.TestCase):
             "<img src='hero.jpg?v=1' srcset='/posts/first/hero.jpg 1x'>"
             "<img srcset='data:image/png;base64,iVBORw0KGgo= 1x, hero.jpg 2x'>"
             "<style>/* url('/static/comment.jpg') */ body{background:url('hero.jpg')}</style>"
+            "<svg><title>Diagram</title><style>rect{fill:none}</style><image href='hero.jpg'/></svg>"
+            "<math><mi>x</mi></math>"
+            "<noscript><img src='hero.jpg'></noscript>"
             "<a href='spaced%20file.pdf'>PDF</a>"
             "<a href='#local'>Anchor</a>"
             "<a href='mailto:jacob@stephens.page'>Email</a>"
@@ -630,6 +633,40 @@ class PublishCommands(unittest.TestCase):
             (POST.replace("</head>", "<style>body{background-image:image-set(url(\"present.jpg\" (foo)) 1x, \"/posts/first/hero.jpg\" 2x)}</style></head>"), "escapes /posts/second/"),
             (POST.replace("</head>", "<style>body{background-image:image-set(src(\"present.jpg\" foo) 1x, \"/static/image.jpg\" 2x)}</style></head>"), "/static/"),
             (POST.replace("</body></html>\n", "<style>body{background:url('/static/image.jpg')}"), "/static/"),
+        ]
+        for html, message in cases:
+            self.write("posts/second/index.html", html)
+            for args in [("check",), ("build",), ("draft", "first"), ("publish", "first")]:
+                with self.subTest(html=html, args=args):
+                    self.assert_rejected_without_writes(*args, message=message)
+
+    def test_html5_mode_foreign_content_cdata_and_noscript_bypasses_fail_without_writes(self):
+        self.write("static/image.jpg", "legacy")
+        self.write("posts/first/hero.jpg", "first-hero")
+        self.write("posts/second/present.jpg", "ok")
+        cases = [
+            (POST.replace("</head>", "<style/>body{background:url('/static/image.jpg')}</style></head>"), "/static/"),
+            (POST.replace("<p>", "<style/>body{background:url('/posts/first/hero.jpg')}</style><p>"), "escapes /posts/second/"),
+            (POST.replace("<p>", "<svg><style>body{background:&#x75;rl('/static/image.jpg')}</style></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<math><style>body{background:&#x75;rl('/static/image.jpg')}</style></math><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><style>/*&#x2a;/body{background:url('/posts/first/hero.jpg')}/*</style></svg><p>"), "escapes /posts/second/"),
+            (POST.replace("<p>", "<svg><style><img src='/static/image.jpg'></style></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<math><style><img src='/static/image.jpg'></style></math><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><title><img src='/static/image.jpg'></title></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><title><a href='/posts/first/hero.jpg'>x</a></title></svg><p>"), "escapes /posts/second/"),
+            (POST.replace("<p>", "<svg><title><style>body{background:url('/static/image.jpg')}</style></title></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><textarea><img src='/static/image.jpg'></textarea></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><xmp><img src='/static/image.jpg'></xmp></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><iframe><img src='/static/image.jpg'></iframe></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><noembed><img src='/static/image.jpg'></noembed></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><noframes><img src='/static/image.jpg'></noframes></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><script><img src='/static/image.jpg'></script></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><plaintext><img src='/static/image.jpg'></svg><p>"), "/static/"),
+            (POST.replace("<p>", "<![CDATA[> <img src='/static/image.jpg'> ]]><p>"), "/static/"),
+            (POST.replace("<p>", "<svg><title></svg><![CDATA[> <img src='/static/image.jpg'> ]]><p>"), "/static/"),
+            (POST.replace("<p>", "<noscript><style></noscript><img src='/static/image.jpg'></style><p>"), "/static/"),
+            (POST.replace("<p>", "<noscript><!--</noscript><img src='/posts/first/hero.jpg'>--><p>"), "escapes /posts/second/"),
+            (POST.replace("<p>", "<noscript><textarea></noscript><img src='/static/image.jpg'></textarea><p>"), "/static/"),
         ]
         for html, message in cases:
             self.write("posts/second/index.html", html)

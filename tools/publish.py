@@ -59,6 +59,17 @@ CSS_ESCAPE_RE = re.compile(r"\\(?:([0-9a-fA-F]{1,6})(?:\r\n|[ \t\n\r\f])?|(\r\n|
 CSS_WS = " \t\n\r\f"
 REFRESH_URL_PREFIX = re.compile(r"url\s*=\s*", re.IGNORECASE)
 ABRUPT_COMMENT_CLOSE = re.compile(r"-?>")
+COMMENT_CLOSE = re.compile(r"--!?>")
+HTML_RAWTEXT_TAGS = frozenset({"style", "script", "xmp", "iframe", "noembed", "noframes", "plaintext"})
+HTML_RCDATA_TAGS = frozenset({"textarea", "title"})
+SVG_HTML_INTEGRATION_TAGS = frozenset({"foreignobject", "desc", "title"})
+MATHML_TEXT_INTEGRATION_TAGS = frozenset({"mi", "mo", "mn", "ms", "mtext"})
+FOREIGN_BREAKOUT_TAGS = frozenset({
+    "b", "big", "blockquote", "body", "br", "center", "code", "dd", "div", "dl", "dt",
+    "em", "embed", "h1", "h2", "h3", "h4", "h5", "h6", "head", "hr", "i", "img", "li",
+    "listing", "menu", "meta", "nobr", "ol", "p", "pre", "ruby", "s", "small", "span",
+    "strong", "strike", "sub", "sup", "table", "tt", "u", "ul", "var",
+})
 MAX_SRCDOC_DEPTH = 16
 SPECIAL_SCHEME_PREFIX = re.compile(r"^(?:https?|ftp|ws|wss|file):", re.IGNORECASE)
 URL_STRIP_CHARS = "".join(chr(code) for code in range(0x21))
@@ -615,19 +626,59 @@ class Reference:
     allow_local_dir: bool
 
 
-class ReferenceParser(HTMLParser):
-    """Extract asset and link references from a post HTML file."""
+class _ReferenceHTMLParser(HTMLParser):
+    """HTML5-aligned tag, foreign-content, comment, and style extractor."""
 
-    def __init__(self, html, path=None, depth=0):
+    def __init__(self, html, path=None, depth=0, scripting=False, seen_srcdocs=None):
         super().__init__(convert_charrefs=True)
+        self.CDATA_CONTENT_ELEMENTS = ()
+        self.RCDATA_CONTENT_ELEMENTS = ()
         self.references = []
+        self.saw_html_noscript = False
         self._path = path
         self._depth = depth
+        self._scripting = scripting
+        self._seen_srcdocs = seen_srcdocs
+        self._allow_cdata_mode = False
+        self._open_elements = []
         self._in_style = False
         self._style_chunks = []
         self.feed(html)
         self.close()
         self._flush_style()
+
+    def set_cdata_mode(self, elem, *args, **kwargs):
+        if self._allow_cdata_mode:
+            super().set_cdata_mode(elem, *args, **kwargs)
+
+    def _enter_html_cdata_mode(self, tag):
+        self._allow_cdata_mode = True
+        try:
+            self.set_cdata_mode(tag)
+        finally:
+            self._allow_cdata_mode = False
+
+    def _in_foreign_content(self, start_tag=None):
+        if not self._open_elements:
+            return False
+        _, namespace, is_html_int, is_math_text_int = self._open_elements[-1]
+        if namespace == "html" or is_html_int:
+            return False
+        if is_math_text_int and start_tag is not None and start_tag not in ("mglyph", "malignmark"):
+            return False
+        return True
+
+    def _in_foreign_namespace(self):
+        return bool(self._open_elements and self._open_elements[-1][1] in ("svg", "math"))
+
+    def _breakout_foreign_content(self):
+        while self._open_elements:
+            el_tag, namespace, is_html_int, is_math_text_int = self._open_elements[-1]
+            if namespace == "html" or is_html_int or is_math_text_int:
+                break
+            if el_tag == "style":
+                self._flush_style()
+            self._open_elements.pop()
 
     def parse_comment(self, i, report=True):
         rawdata = self.rawdata
@@ -637,7 +688,30 @@ class ReferenceParser(HTMLParser):
                 if report:
                     self.handle_comment("")
                 return abrupt.end()
+            close = COMMENT_CLOSE.search(rawdata, i + 4)
+            if not close:
+                return -1
+            if report:
+                self.handle_comment(rawdata[i + 4:close.start()])
+            return close.end()
         return super().parse_comment(i, report=report)
+
+    def parse_html_declaration(self, i):
+        rawdata = self.rawdata
+        if rawdata.startswith("<![CDATA[", i):
+            if self._in_foreign_namespace():
+                end = rawdata.find("]]>", i + 9)
+                if end < 0:
+                    return -1
+                if self._in_style:
+                    self._style_chunks.append(rawdata[i + 9:end])
+                return end + 3
+            return self.parse_bogus_comment(i)
+        return super().parse_html_declaration(i)
+
+    def unknown_decl(self, data):
+        if self._in_style and self._in_foreign_namespace() and data.startswith("CDATA["):
+            self._style_chunks.append(data[6:])
 
     def _add(self, url, is_page_link=False, allow_local_dir=False):
         self.references.append(Reference(url, is_page_link, allow_local_dir))
@@ -652,11 +726,7 @@ class ReferenceParser(HTMLParser):
             self._in_style = False
             self._style_chunks = []
 
-    def handle_starttag(self, tag, attrs):
-        # HTML5 keeps the first occurrence of duplicate attributes on an element.
-        first_attrs = {}
-        for name, value in attrs:
-            first_attrs.setdefault(name, value)
+    def _extract_tag_urls(self, tag, first_attrs):
         if tag == "base" and first_attrs.get("href") is not None:
             raise InvalidSite(f"{self._path or 'html'}: <base href> is not allowed inside post HTML")
         rel_tokens = (first_attrs.get("rel") or "").lower().split()
@@ -685,12 +755,72 @@ class ReferenceParser(HTMLParser):
             if srcdoc is not None:
                 if self._depth >= MAX_SRCDOC_DEPTH:
                     raise InvalidSite(f"{self._path or 'html'}: nested iframe srcdoc exceeds maximum depth")
-                self.references.extend(ReferenceParser(srcdoc, self._path, self._depth + 1).references)
+                if self._seen_srcdocs is None or srcdoc not in self._seen_srcdocs:
+                    if self._seen_srcdocs is not None:
+                        self._seen_srcdocs.add(srcdoc)
+                    self.references.extend(
+                        ReferenceParser(srcdoc, self._path, self._depth + 1, self._seen_srcdocs).references
+                    )
         elif tag == "meta":
             self._handle_meta(first_attrs)
-        elif tag == "style":
-            self._in_style = True
-            self._style_chunks = []
+
+    def _process_starttag(self, tag, attrs, self_closing):
+        # HTML5 keeps the first occurrence of duplicate attributes on an element.
+        first_attrs = {}
+        for name, value in attrs:
+            first_attrs.setdefault(name, value)
+
+        if self._in_foreign_content(tag):
+            is_breakout = (
+                tag in FOREIGN_BREAKOUT_TAGS
+                or (tag == "font" and any(key in first_attrs for key in ("color", "face", "size")))
+            )
+            if not is_breakout:
+                self._extract_tag_urls(tag, first_attrs)
+                if not self_closing:
+                    namespace = self._open_elements[-1][1]
+                    is_html_int = (
+                        (namespace == "svg" and tag in SVG_HTML_INTEGRATION_TAGS)
+                        or (
+                            namespace == "math"
+                            and tag == "annotation-xml"
+                            and (first_attrs.get("encoding") or "").strip().lower()
+                            in ("text/html", "application/xhtml+xml")
+                        )
+                    )
+                    is_math_text_int = namespace == "math" and tag in MATHML_TEXT_INTEGRATION_TAGS
+                    self._open_elements.append((tag, namespace, is_html_int, is_math_text_int))
+                    if tag == "style":
+                        self._flush_style()
+                        self._in_style = True
+                        self._style_chunks = []
+                return
+            self._breakout_foreign_content()
+
+        if tag in ("svg", "math"):
+            self._extract_tag_urls(tag, first_attrs)
+            if not self_closing:
+                self._open_elements.append((tag, tag, False, False))
+            return
+
+        self._extract_tag_urls(tag, first_attrs)
+        if tag == "noscript":
+            self.saw_html_noscript = True
+        if tag in HTML_RAWTEXT_TAGS or (self._scripting and tag == "noscript"):
+            if tag == "style":
+                self._in_style = True
+                self._style_chunks = []
+            self._enter_html_cdata_mode(tag)
+        elif tag in HTML_RCDATA_TAGS:
+            self._enter_html_cdata_mode(tag)
+        elif not self_closing and tag not in Document.VOID_TAGS:
+            self._open_elements.append((tag, "html", False, False))
+
+    def handle_starttag(self, tag, attrs):
+        self._process_starttag(tag, attrs, self_closing=False)
+
+    def handle_startendtag(self, tag, attrs):
+        self._process_starttag(tag, attrs, self_closing=True)
 
     def _handle_meta(self, attr_map):
         content = attr_map.get("content")
@@ -709,12 +839,45 @@ class ReferenceParser(HTMLParser):
                 self._add(target, is_page_link=True, allow_local_dir=True)
 
     def handle_endtag(self, tag):
-        if tag == "style":
+        if tag == "style" and not self._in_foreign_content():
             self._flush_style()
+        in_foreign_el = bool(self._open_elements and self._open_elements[-1][1] != "html")
+        if self._in_foreign_content() and tag in ("br", "p"):
+            self._breakout_foreign_content()
+            return
+        for index in range(len(self._open_elements) - 1, -1, -1):
+            el_tag, namespace, _, _ = self._open_elements[index]
+            if el_tag == tag:
+                if any(item[0] == "style" and item[1] != "html" for item in self._open_elements[index:]):
+                    self._flush_style()
+                del self._open_elements[index:]
+                return
+            if in_foreign_el:
+                if namespace == "html":
+                    break
+            elif namespace != "html":
+                break
 
     def handle_data(self, data):
         if self._in_style:
             self._style_chunks.append(data)
+
+
+class ReferenceParser:
+    """Extract asset and link references from a post HTML file."""
+
+    def __init__(self, html, path=None, depth=0, _seen_srcdocs=None):
+        seen_srcdocs = _seen_srcdocs if _seen_srcdocs is not None else set()
+        scanner = _ReferenceHTMLParser(
+            html, path=path, depth=depth, scripting=False, seen_srcdocs=seen_srcdocs,
+        )
+        references = list(scanner.references)
+        if scanner.saw_html_noscript:
+            scripted = _ReferenceHTMLParser(
+                html, path=path, depth=depth, scripting=True, seen_srcdocs=seen_srcdocs,
+            )
+            references.extend(scripted.references)
+        self.references = list(dict.fromkeys(references))
 
 
 def preprocess_url(html_path, raw_url):
