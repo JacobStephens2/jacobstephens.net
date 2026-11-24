@@ -87,7 +87,8 @@ function buildArchive(t, body) {
   mkdirSync(path.dirname(publisher));
   mkdirSync(path.join(site, 'posts/observation-log'), { recursive: true });
   copyFileSync(path.join(root, 'tools/publish.py'), publisher);
-  writeFileSync(archive, '<!doctype html><html><head><title>Posts</title></head>' + body.html() + '</html>');
+  const authored = '<!doctype html><html><head><title>Posts</title></head>' + body.html() + '</html>';
+  writeFileSync(archive, authored);
   writeFileSync(path.join(site, 'posts/observation-log/index.html'),
     '<!doctype html><html><head><title>Observation Log</title></head><body></body></html>');
   writeFileSync(path.join(site, 'posts.json'), JSON.stringify({
@@ -100,7 +101,11 @@ function buildArchive(t, body) {
   for (const args of [['build'], ['publish', 'observation-log'], ['check']]) {
     execFileSync('python3', [publisher, ...args]);
   }
-  return readFileSync(archive, 'utf8');
+  const published = readFileSync(archive, 'utf8');
+  const archiveLists = /(<ul class="archive-list">)[\s\S]*?(<\/ul>)/g;
+  assert.equal(published.replace(archiveLists, '$1$2'), authored.replace(archiveLists, '$1$2'),
+    'publishing preserves the authored markup used by the DOM stand-in');
+  return published;
 }
 
 function browserHost(body, script, hash) {
