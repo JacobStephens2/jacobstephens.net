@@ -466,25 +466,23 @@
         var layout = document.getElementById('archive-layout');
         if (!layout) return;
 
-        var categoryIds = {
-          'by-category': true,
-          'short-story': true,
-          'web-development': true,
-          'workflows': true,
-          'graphic-design': true,
-          'e-commerce': true,
-          'general': true,
-          'essay': true,
-          'research-paper': true,
-          'chemistry': true,
-          'poetry': true,
-          'ai-assisted': true,
-          'handwritten': true
-        };
+        var categoryView = document.getElementById('by-category');
+
+        function categoryHeading(id) {
+          var heading = document.getElementById(id);
+          if (!heading || heading.parentElement !== categoryView ||
+              !heading.matches('h3.archive-category-heading')) return null;
+
+          var list = heading.nextElementSibling;
+          return list && list.matches('ul.archive-list') ? heading : null;
+        }
 
         function applyView() {
-          var hash = (location.hash || '').slice(1);
-          var view = categoryIds[hash] ? 'category' : 'chronological';
+          var fragment = location.hash;
+          var heading = fragment && fragment !== '#chronological' && fragment !== '#by-category'
+            ? categoryHeading(fragment.slice(1))
+            : null;
+          var view = fragment === '#by-category' || heading ? 'category' : 'chronological';
           layout.setAttribute('data-view', view);
 
           document.querySelectorAll('.archive-sort-link').forEach(function (link) {
@@ -493,13 +491,10 @@
             link.classList.toggle('is-active', active);
           });
 
-          if (hash && categoryIds[hash] && hash !== 'by-category') {
-            var target = document.getElementById(hash);
-            if (target) {
-              requestAnimationFrame(function () {
-                target.scrollIntoView({ block: 'start' });
-              });
-            }
+          if (heading) {
+            requestAnimationFrame(function () {
+              if (location.hash === fragment) heading.scrollIntoView({ block: 'start' });
+            });
           }
         }
 
