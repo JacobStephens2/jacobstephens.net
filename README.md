@@ -148,12 +148,14 @@ coordination with concurrent writers.
 
 ## Publishing tests
 
-Python 3.10+ is required. Tests use only the standard library and disposable sites:
+Python 3.10+ is required. The archive navigation test also uses Node.js.
+Tests use only standard libraries and disposable sites:
 
 ```sh
 python3 -m unittest discover -s tests -v
 python3 -m unittest discover -s tests -p test_publish.py -k transitions -v
 python3 -m py_compile tools/publish.py tests/test_publish.py tests/test_post_assets.py
+node --test tests/test_archive.cjs
 python3 tools/publish.py build
 python3 tools/publish.py check
 ```
